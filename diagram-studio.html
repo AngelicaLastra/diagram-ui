@@ -174,6 +174,62 @@ svg { display: block; }
 }
 .tone:hover { transform: translateY(-1px); box-shadow: var(--shadow); }
 
+/* ---------------- reveal order panel ---------------- */
+.order-panel { width: 248px; flex: 0 0 248px; border-right: 0; border-left: 1px solid var(--hair); }
+.order-head { display: flex; align-items: center; padding-right: 8px; }
+.order-head .btn { height: 24px; padding: 0 8px; font-size: 11.5px; }
+.order-head .btn:disabled { opacity: .35; }
+.order-note { margin: 0 4px 10px; font-size: 11px; line-height: 1.55; color: var(--ink-soft); }
+.order-label { margin: 12px 4px 6px; font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); }
+.start-zone {
+  min-height: 38px; padding: 5px; border: 1.5px dashed var(--hair); border-radius: var(--r);
+  display: flex; flex-direction: column; gap: 2px; transition: border-color 120ms, background 120ms;
+}
+.start-zone .empty { font-size: 11px; color: var(--ink-soft); padding: 5px 4px; line-height: 1.45; }
+.step {
+  display: flex; gap: 8px; align-items: flex-start; padding: 6px 6px 6px 7px;
+  border: 1px solid var(--hair); border-radius: var(--r); background: var(--paper);
+  transition: border-color 120ms, background 120ms, box-shadow 160ms;
+}
+.step:hover { border-color: var(--ink-soft); }
+.step.picked { border-color: var(--ink-mid); background: var(--shell); }
+.step.playing { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-soft); }
+.step.over, .start-zone.over { border-color: var(--red); background: var(--red-soft); }
+.step-num {
+  flex: 0 0 auto; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%;
+  display: grid; place-items: center; background: var(--pill); color: var(--ink-mid);
+  font-size: 11px; font-weight: 600; cursor: grab;
+}
+.step:hover .step-num { background: var(--pill-on); color: var(--ink); }
+.step-items { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.step { position: relative; }
+.step-tools {
+  position: absolute; top: 5px; right: 5px; display: flex; align-items: center; gap: 1px;
+  padding-left: 10px; background: linear-gradient(90deg, transparent, var(--paper) 10px);
+  opacity: 0; pointer-events: none; transition: opacity 120ms;
+}
+.step.picked .step-tools { background: linear-gradient(90deg, transparent, var(--shell) 10px); }
+.step:hover .step-tools, .step:focus-within .step-tools { opacity: 1; pointer-events: auto; }
+.step:hover .step-tools, .step:focus-within .step-tools { opacity: 1; }
+.step-tools .btn { width: 20px; height: 20px; min-width: 0; padding: 0; border-radius: 4px; color: var(--ink-soft); }
+.step-tools .btn:hover:not(:disabled) { color: var(--ink); }
+.step-tools .btn:disabled { opacity: .3; }
+.chip {
+  display: flex; align-items: center; gap: 6px; min-width: 0; padding: 3px 5px;
+  border-radius: 5px; font-size: 12px; color: var(--ink); cursor: grab; text-align: left;
+}
+.chip:hover { background: var(--pill); }
+.chip svg { flex: 0 0 auto; color: var(--ink-soft); }
+.chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.dim span { color: var(--ink-soft); font-style: italic; }
+.gap { height: 7px; position: relative; }
+.gap.over::after { content: ""; position: absolute; left: 4px; right: 4px; top: 2px; height: 3px; border-radius: 2px; background: var(--red); }
+.dragging { opacity: .4; }
+/* the panel clips at its edges, so its tooltips hug the side they start on */
+.order-panel [data-tip]:hover::after { left: 0; transform: none; }
+.order-panel .step-tools [data-tip]:hover::after, .order-head [data-tip]:hover::after { left: auto; right: 0; }
+.order-head [data-tip]:hover::after { white-space: normal; width: 190px; }
+
 /* ---------------- stage ---------------- */
 .stagewrap {
   position: relative; flex: 1 1 auto; min-width: 0;
@@ -446,6 +502,15 @@ input[type="color"] {
         <textarea id="inlineEdit" class="inline-edit" hidden spellcheck="false" aria-label="Edit label" rows="1"></textarea>
       </div>
     </div>
+
+    <aside class="drawer order-panel" id="orderPanel" aria-label="Reveal order" hidden>
+      <div class="order-head">
+        <span class="drawer-head">Reveal order</span>
+        <span class="grow"></span>
+        <button type="button" class="btn" id="orderReset" data-tip="Go back to the automatic order, which follows the arrows">Reset</button>
+      </div>
+      <div class="drawer-body" id="orderBody"></div>
+    </aside>
   </div>
 
   <footer class="statusbar">
@@ -573,6 +638,9 @@ var ICONS = {
   code: '<path d="M6.4 5.8 L3 9 L6.4 12.2 M11.6 5.8 L15 9 L11.6 12.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
   lock: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="4" y="7.8" width="10" height="7.2" rx="1.6"/><path d="M6.2 7.8V5.8a2.8 2.8 0 0 1 5.6 0v2"/></g>',
   eye: '<g fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.6 9S4.3 4.2 9 4.2 16.4 9 16.4 9 13.7 13.8 9 13.8 1.6 9 1.6 9z"/><circle cx="9" cy="9" r="2.3"/></g>',
+  order: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M7.5 4.5 H15 M7.5 9 H15 M7.5 13.5 H15"/></g><g fill="currentColor"><circle cx="3.8" cy="4.5" r="1.3"/><circle cx="3.8" cy="9" r="1.3"/><circle cx="3.8" cy="13.5" r="1.3"/></g>',
+  up: '<path d="M5 11 L9 7 L13 11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  down: '<path d="M5 7 L9 11 L13 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
   page: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3.6" y="2.8" width="10.8" height="12.4" rx="1.4"/><path d="M6.2 6.4h5.6M6.2 9h5.6M6.2 11.6h3.4"/></g>'
 };
 
@@ -622,7 +690,7 @@ var MOD = isMac ? "⌘" : "Ctrl";
    3. Document model
    ================================================================ */
 function newPage(name) {
-  return { id: uid("p"), name: name || "Sheet 1", w: 900, h: 660, nodes: [], edges: [], texts: [] };
+  return { id: uid("p"), name: name || "Sheet 1", w: 900, h: 660, nodes: [], edges: [], texts: [], reveal: null };
 }
 
 var doc = { title: "Untitled sketch", pages: [newPage("Sheet 1")], active: 0 };
@@ -1654,6 +1722,17 @@ function drawOverlay() {
     });
   });
 
+  orderHover.forEach(function (id) {
+    var f = findAny(id), b = f && boxOf(f);
+    if (!b) return;
+    overlay.appendChild(makeEl("rect", {
+      x: (b.x - 6 * k).toFixed(1), y: (b.y - 6 * k).toFixed(1),
+      width: (b.w + 12 * k).toFixed(1), height: (b.h + 12 * k).toFixed(1),
+      fill: "rgba(221,75,68,.06)", stroke: RED, "stroke-width": (1.2 * k).toFixed(2),
+      "stroke-dasharray": (4 * k) + " " + (3 * k), rx: 6 * k
+    }));
+  });
+
   if (editing) return;
   var chosenList = selList();
   if (!chosenList.length) return;
@@ -1774,6 +1853,7 @@ function computeGuides(movingIds, box) {
 
 function render() {
   renderCanvas();
+  renderOrderPanel();
   renderBubble();
   renderPages();
   refreshHistory();
@@ -1791,7 +1871,7 @@ function selectAll() {
     .concat(texts().map(function (t) { return t.id; })));
   afterSelect();
 }
-function afterSelect() { drawOverlay(); renderBubble(); }
+function afterSelect() { drawOverlay(); renderBubble(); markPickedSteps(); }
 
 /* ================================================================
    13. Creating things
@@ -3231,6 +3311,12 @@ function buildRail() {
     pressed: !$("drawer").hidden,
     onClick: function () { $("drawer").hidden = !$("drawer").hidden; buildRail(); applyView(); }
   }));
+  var order = toolButton({
+    icon: "order", title: "Reveal order: choose what appears when  (O)",
+    pressed: !$("orderPanel").hidden, onClick: function () { toggleOrderPanel(); }
+  });
+  order.setAttribute("aria-controls", "orderPanel");
+  rail.appendChild(order);
 }
 
 function stencilPreview(kind) {
@@ -3545,6 +3631,28 @@ $("addPage").addEventListener("click", function () {
    ================================================================ */
 var revealTimers = [];
 
+/* A sheet can carry its own reveal: things shown from the start, then
+   steps that each appear together. Anything the custom order does not
+   mention (new shapes, pasted ones) joins at the end in the automatic
+   order, so the custom order never hides something. */
+function revealSteps() {
+  var auto = revealOrder();
+  var custom = page().reveal;
+  if (!custom) return { start: [], steps: auto.map(function (k) { return [k]; }), custom: false };
+  var live = new Set(auto), seen = new Set();
+  function keep(list) {
+    return (list || []).filter(function (k) {
+      if (!live.has(k) || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }
+  var start = keep(custom.start);
+  var steps = custom.steps.map(keep).filter(function (st) { return st.length; });
+  auto.forEach(function (k) { if (!seen.has(k)) steps.push([k]); });
+  return { start: start, steps: steps, custom: true };
+}
+
 function revealOrder() {
   var keys = [], seen = {};
   function visit(id) {
@@ -3586,6 +3694,7 @@ function stopReveal() {
   hitsGroup.style.display = "";
   showEverything();
   setPlayButton();
+  markPlayingStep(-1);
   setHint("Reveal stopped.");
 }
 function playReveal() {
@@ -3597,25 +3706,216 @@ function playReveal() {
   closeEditor(true);
   render();
 
-  var order = revealOrder();
+  var plan = revealSteps();
+  if (!plan.steps.length) { setHint("Everything is set to show from the start, so there is nothing to reveal."); return; }
   var step = parseInt($("speed").value, 10);
-  order.forEach(function (key) { setKeyOpacity(key, "0"); });
+  plan.steps.forEach(function (keys) { keys.forEach(function (key) { setKeyOpacity(key, "0"); }); });
   hitsGroup.style.display = "none";
   setHint("Playing. Press Play again or click the sheet to stop.");
 
-  order.forEach(function (key, index) {
+  plan.steps.forEach(function (keys, index) {
     revealTimers.push(setTimeout(function () {
-      setKeyOpacity(key, "1");
-      if (index === order.length - 1) {
+      keys.forEach(function (key) { setKeyOpacity(key, "1"); });
+      markPlayingStep(index);
+      if (index === plan.steps.length - 1) {
         revealTimers = [];
         hitsGroup.style.display = "";
         setPlayButton();
+        markPlayingStep(-1);
         setHint("Reveal finished.");
       }
     }, index * step));
   });
   setPlayButton();
 }
+
+/* ================================================================
+   23b. Reveal order panel
+        Steps can be dragged around, items dragged between steps (to
+        appear together) or into the gaps (to get a step of their own).
+        The arrows on each step do the same for anyone not dragging.
+   ================================================================ */
+var orderPanel = $("orderPanel"), orderBody = $("orderBody");
+var orderDrag = null;     /* ids being dragged in the panel */
+var orderHover = [];      /* ids outlined on the sheet while a step is hovered */
+
+function itemName(id) {
+  var f = findAny(id);
+  if (!f) return { label: "", icon: "box", dim: true };
+  var it = f.item;
+  if (f.kind === "text") return { label: it.text.split("\n")[0] || "Empty text", icon: "text", dim: !it.text };
+  if (f.kind === "edge") {
+    if (it.label) return { label: it.label, icon: "connect" };
+    var a = findNode(it.from), b = findNode(it.to);
+    return { label: "Arrow: " + shortName(a) + " → " + shortName(b), icon: "connect", dim: true };
+  }
+  if (it.type === "image") return { label: "Image", icon: "image", dim: true };
+  if (it.type === "table") {
+    var first = [].concat.apply([], it.cells).filter(Boolean)[0];
+    return { label: first ? "Table: " + first : "Table", icon: "table", dim: !first };
+  }
+  var kinds = { box: "Box", diamond: "Diamond", ellipse: "Ellipse", pill: "Pill", note: "Note" };
+  var title = (it.title || "").split("\n")[0];
+  return { label: title || kinds[it.type] || "Shape", icon: it.style === "sketch" ? "sketch" : it.type, dim: !title };
+}
+function shortName(node) {
+  if (!node) return "?";
+  return (node.title || "").split("\n")[0] || (node.type === "image" ? "image" : node.type);
+}
+
+/* Moves ids to the start zone, into a step, or into the gap before step
+   `index` (an index past the end makes a new last step). Taking the ids
+   out first keeps every step in place, so the indexes still line up. */
+function moveReveal(ids, target) {
+  var r = revealSteps(), gone = new Set(ids);
+  function strip(list) { return list.filter(function (k) { return !gone.has(k); }); }
+  var start = strip(r.start), steps = r.steps.map(strip);
+  if (target.kind === "start") start = start.concat(ids);
+  else if (target.kind === "step") steps[target.index] = steps[target.index].concat(ids);
+  else steps.splice(target.index, 0, ids.slice());
+  page().reveal = { start: start, steps: steps.filter(function (st) { return st.length; }) };
+  commit(); render();
+}
+function moveStep(index, by) {
+  var r = revealSteps(), to = index + by;
+  if (to < 0 || to >= r.steps.length) return;
+  var moving = r.steps.splice(index, 1)[0];
+  r.steps.splice(to, 0, moving);
+  page().reveal = { start: r.start, steps: r.steps };
+  commit(); render();
+}
+function splitStep(index) {
+  var r = revealSteps(), parts = r.steps[index].map(function (k) { return [k]; });
+  r.steps.splice.apply(r.steps, [index, 1].concat(parts));
+  page().reveal = { start: r.start, steps: r.steps };
+  commit(); render();
+}
+
+function orderChip(id) {
+  var info = itemName(id);
+  var chip = htmlEl("button", "chip" + (info.dim ? " dim" : ""));
+  chip.type = "button";
+  chip.draggable = true;
+  chip.appendChild(icon(info.icon, 14));
+  chip.appendChild(htmlEl("span", null, info.label));
+  chip.dataset.tip = "Drag to another step";
+  chip.addEventListener("click", function (e) { e.stopPropagation(); selectOnly(id); });
+  chip.addEventListener("dragstart", function (e) { startOrderDrag(e, [id], chip); e.stopPropagation(); });
+  chip.addEventListener("dragend", endOrderDrag);
+  return chip;
+}
+function startOrderDrag(e, ids, el) {
+  orderDrag = ids;
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", "reveal");
+  el.classList.add("dragging");
+}
+function endOrderDrag() {
+  orderDrag = null;
+  Array.prototype.forEach.call(orderBody.querySelectorAll(".dragging, .over"), function (n) { n.classList.remove("dragging", "over"); });
+}
+function dropTarget(el, target) {
+  el.addEventListener("dragover", function (e) {
+    if (!orderDrag) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    el.classList.add("over");
+  });
+  el.addEventListener("dragleave", function (e) { if (!el.contains(e.relatedTarget)) el.classList.remove("over"); });
+  el.addEventListener("drop", function (e) {
+    if (!orderDrag) return;
+    e.preventDefault(); e.stopPropagation();
+    var ids = orderDrag;
+    endOrderDrag();
+    moveReveal(ids, target);
+  });
+}
+function hoverIds(ids) { orderHover = ids; drawOverlay(); }
+
+function renderOrderPanel() {
+  if (orderPanel.hidden) return;
+  clear(orderBody);
+  var r = revealSteps();
+  $("orderReset").disabled = !r.custom;
+
+  orderBody.appendChild(htmlEl("p", "order-note",
+    "Drag to change what appears when. Drop onto a step to show things together, or between steps to give them their own."));
+
+  orderBody.appendChild(htmlEl("div", "order-label", "Showing from the start"));
+  var zone = htmlEl("div", "start-zone");
+  if (r.start.length) r.start.forEach(function (id) { zone.appendChild(orderChip(id)); });
+  else zone.appendChild(htmlEl("div", "empty", "Drop things here to have them on the sheet before Play begins."));
+  dropTarget(zone, { kind: "start" });
+  orderBody.appendChild(zone);
+
+  orderBody.appendChild(htmlEl("div", "order-label", r.steps.length ? "Then, one step at a time" : "No steps yet"));
+  r.steps.forEach(function (ids, index) {
+    var gap = htmlEl("div", "gap");
+    dropTarget(gap, { kind: "gap", index: index });
+    orderBody.appendChild(gap);
+
+    var card = htmlEl("div", "step");
+    card.dataset.step = index;
+    if (ids.some(function (id) { return sel.has(id); })) card.classList.add("picked");
+    var num = htmlEl("span", "step-num", String(index + 1));
+    num.draggable = true;
+    num.dataset.tip = "Drag to move this step";
+    num.addEventListener("dragstart", function (e) { startOrderDrag(e, ids.slice(), card); });
+    num.addEventListener("dragend", endOrderDrag);
+    card.appendChild(num);
+
+    var list = htmlEl("div", "step-items");
+    ids.forEach(function (id) { list.appendChild(orderChip(id)); });
+    card.appendChild(list);
+
+    var tools = htmlEl("div", "step-tools");
+    tools.appendChild(toolButton({ icon: "up", title: "Earlier", size: 14, disabled: index === 0, onClick: function () { moveStep(index, -1); } }));
+    tools.appendChild(toolButton({ icon: "down", title: "Later", size: 14, disabled: index === r.steps.length - 1, onClick: function () { moveStep(index, 1); } }));
+    if (ids.length > 1) {
+      tools.appendChild(toolButton({ icon: "distV", title: "Split into separate steps", size: 14, onClick: function () { splitStep(index); } }));
+    }
+    card.appendChild(tools);
+
+    card.addEventListener("mouseenter", function () { hoverIds(ids); });
+    card.addEventListener("mouseleave", function () { hoverIds([]); });
+    card.addEventListener("click", function () {
+      sel = new Set(ids); afterSelect();
+    });
+    dropTarget(card, { kind: "step", index: index });
+    orderBody.appendChild(card);
+  });
+  var tail = htmlEl("div", "gap");
+  dropTarget(tail, { kind: "gap", index: r.steps.length });
+  orderBody.appendChild(tail);
+}
+function markPickedSteps() {
+  if (orderPanel.hidden) return;
+  var r = revealSteps();
+  Array.prototype.forEach.call(orderBody.querySelectorAll(".step"), function (card) {
+    var ids = r.steps[+card.dataset.step] || [];
+    card.classList.toggle("picked", ids.some(function (id) { return sel.has(id); }));
+  });
+}
+function markPlayingStep(index) {
+  Array.prototype.forEach.call(orderBody.querySelectorAll(".step"), function (card) {
+    card.classList.toggle("playing", +card.dataset.step === index);
+  });
+  var live = orderBody.querySelector(".step.playing");
+  if (live && live.scrollIntoView) live.scrollIntoView({ block: "nearest", behavior: reduceMotion ? "auto" : "smooth" });
+}
+function toggleOrderPanel(open) {
+  orderPanel.hidden = open === undefined ? !orderPanel.hidden : !open;
+  buildRail();
+  orderHover = [];
+  renderOrderPanel();
+  applyView();
+}
+$("orderReset").addEventListener("click", function () {
+  if (!page().reveal) return;
+  page().reveal = null;
+  commit(); render();
+  toast("Back to the automatic order");
+});
 
 /* ================================================================
    24. Export and files
@@ -3843,11 +4143,11 @@ function rasterize(svg, w, h, done, fail) {
    the same 200ms fade (skipped when transparent, since GIF has no soft
    edges). The last frame holds so the finished sheet can be read. */
 function gifPlan(opts) {
-  var keys = revealOrder();
-  if (!opts.animated || !keys.length) return { keys: keys, frames: [{ visible: Infinity, partial: 0, delay: 0 }] };
+  var steps = revealSteps().steps;
+  if (!opts.animated || !steps.length) return { steps: steps, frames: [{ visible: Infinity, partial: 0, delay: 0 }] };
   var step = parseInt($("speed").value, 10) || 700;
   var frames = [{ visible: 0, partial: 0, delay: 500 }];
-  keys.forEach(function (key, i) {
+  steps.forEach(function (keys, i) {
     if (opts.background) {
       frames.push({ visible: i, partial: 1 / 3, delay: 70 }, { visible: i, partial: 2 / 3, delay: 70 });
       frames.push({ visible: i + 1, partial: 0, delay: Math.max(60, step - 140) });
@@ -3856,12 +4156,12 @@ function gifPlan(opts) {
     }
   });
   frames[frames.length - 1].delay += 2500;
-  return { keys: keys, frames: frames };
+  return { steps: steps, frames: frames };
 }
 function exportGif(opts, onProgress, onDone, onFail) {
   var p = page(), w = Math.round(p.w * opts.scale), h = Math.round(p.h * opts.scale);
   var plan = gifPlan(opts), order = {};
-  plan.keys.forEach(function (k, i) { order[k] = i; });
+  plan.steps.forEach(function (keys, i) { keys.forEach(function (k) { order[k] = i; }); });
   var job = { cancelled: false };
 
   function svgFor(f) {
@@ -4008,7 +4308,8 @@ function upgradePage(p) {
     id: p.id || uid("p"), name: p.name || "Sheet", w: p.w || 900, h: p.h || 660,
     nodes: (p.nodes || []).map(upgradeNode),
     edges: (p.edges || []).map(upgradeEdge),
-    texts: (p.texts || []).map(upgradeText)
+    texts: (p.texts || []).map(upgradeText),
+    reveal: p.reveal && Array.isArray(p.reveal.steps) ? p.reveal : null
   };
 }
 function openJsonText(text) {
@@ -4059,7 +4360,7 @@ function showShortcuts() {
     m.appendChild(htmlEl("p", "sub", "These all work while the sheet has focus."));
     var keys = htmlEl("div", "keys");
     [["V  H", "Select, pan"], ["B  D  S  E", "Box, diamond, inked, ellipse"], ["G", "Table"],
-     ["T", "Text"], ["C", "Draw an arrow"], ["I", "Import an image"],
+     ["T", "Text"], ["C", "Draw an arrow"], ["I", "Import an image"], ["O", "Show or hide the reveal order"],
      [MOD + " + V", "Paste shapes, or a picture you copied"],
      ["Double click", "Type on a shape, arrow or label"], ["Enter", "Edit whatever is selected"],
      ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
@@ -4229,6 +4530,7 @@ document.addEventListener("keydown", function (event) {
   }
 
   if (event.key.toLowerCase() === "i") { openImagePicker(); return; }
+  if (event.key.toLowerCase() === "o") { toggleOrderPanel(); return; }
   var shortcut = SHORTCUT_TOOLS[event.key.toLowerCase()];
   if (shortcut) setTool(shortcut);
 });
