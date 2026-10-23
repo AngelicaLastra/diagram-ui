@@ -2343,27 +2343,66 @@ function addTableCol(node, at) {
   node.colW = ws.map(function (w) { return Math.round(w); });
   node.w = Math.round(node.w + fresh);
 }
+/* Deletes rows (axis "r") or columns ("c") a0 to a1. The others keep
+   their size, so the table shrinks around the gap. A merged region that
+   loses its top-left cell hands its text, colour and alignment to the
+   first of its cells that stays. Returns false if nothing would be left. */
+function deleteTableSpan(n, axis, a0, a1) {
+  var t = tableSize(n), count = a1 - a0 + 1;
+  if (count >= (axis === "r" ? t.rows : t.cols)) return false;
+  var merges = tableMerges(n);
+  merges.forEach(function (m) {
+    var start = axis === "r" ? m.r : m.c, end = start + (axis === "r" ? m.rs : m.cs) - 1;
+    if (start < a0 || start > a1 || a1 + 1 > end) return;
+    var r = axis === "r" ? a1 + 1 : m.r, c = axis === "r" ? m.c : a1 + 1;
+    n.cells[r][c] = n.cells[m.r][m.c]; n.fills[r][c] = n.fills[m.r][m.c]; n.aligns[r][c] = n.aligns[m.r][m.c];
+  });
+  n.merges = merges.map(function (m) {
+    var start = axis === "r" ? m.r : m.c, len = axis === "r" ? m.rs : m.cs, end = start + len - 1;
+    var cut = Math.max(0, Math.min(end, a1) - Math.max(start, a0) + 1);
+    var moved = start > a1 ? start - count : start >= a0 ? a0 : start;
+    return axis === "r" ? { r: moved, c: m.c, rs: len - cut, cs: m.cs } : { r: m.r, c: moved, rs: m.rs, cs: len - cut };
+  });
+  if (axis === "r") {
+    n.cells.splice(a0, count); n.fills.splice(a0, count); n.aligns.splice(a0, count);
+    n.h = Math.max(MIN_H, Math.round(n.h - count * t.ch));
+  } else {
+    var ws = colWidths(n), gone = ws.splice(a0, count).reduce(function (a, b) { return a + b; }, 0);
+    [n.cells, n.fills, n.aligns].forEach(function (grid) { grid.forEach(function (row) { row.splice(a0, count); }); });
+    n.colW = ws.map(function (w) { return Math.round(w); });
+    n.w = Math.max(MIN_W, Math.round(n.w - gone));
+  }
+  trimMerges(n);
+  return true;
+}
+/* The remove buttons take away the picked rows or columns, or the last
+   one when no cell is picked. */
 function editTables(change) {
   var list = selNodes().filter(function (n) { return n.type === "table"; });
   if (!list.length) return;
+  var pick = currentCell(), before = stateJSON();
   list.forEach(function (n) {
     if (!n.aligns) syncFills(n);
-    var t = tableSize(n);
+    var t = tableSize(n), mine = pick && pick.node === n;
     if (change === "addRow") addTableRow(n);
     if (change === "addCol") addTableCol(n);
-    if (change === "dropRow" && t.rows > 1) { n.cells.pop(); n.fills.pop(); n.aligns.pop(); n.h = Math.max(MIN_H, Math.round(n.h - t.ch)); }
-    if (change === "dropCol" && t.cols > 1) {
-      var ws = colWidths(n), gone = ws.pop();
-      n.cells.forEach(function (row) { row.pop(); });
-      n.fills.forEach(function (row) { row.pop(); });
-      n.aligns.forEach(function (row) { row.pop(); });
-      n.colW = ws.map(function (w) { return Math.round(w); });
-      n.w = Math.max(MIN_W, Math.round(n.w - gone));
+    if (change === "dropRow" && !deleteTableSpan(n, "r", mine ? pick.r0 : t.rows - 1, mine ? pick.r1 : t.rows - 1)) {
+      toast("A table needs at least one row");
+    }
+    if (change === "dropCol" && !deleteTableSpan(n, "c", mine ? pick.c0 : t.cols - 1, mine ? pick.c1 : t.cols - 1)) {
+      toast("A table needs at least one column");
     }
     if (change === "evenCols") n.colW = null;
     trimMerges(n);
+    /* keep a cell picked where the deleted ones were */
+    if (mine && (change === "dropRow" || change === "dropCol")) {
+      var left = tableSize(n), r = clamp(pick.r0, 0, left.rows - 1), c = clamp(pick.c0, 0, left.cols - 1);
+      var m = mergeAt(n, r, c);
+      pickCell(n.id, m ? m.r : r, m ? m.c : c);
+    }
   });
-  commit(); render();
+  if (stateJSON() !== before) commit();   /* a refused delete is not an undo step */
+  render();
 }
 function addNode(type, style, at, tone) {
   var node = makeNode(type, style, at, tone);
@@ -3814,8 +3853,12 @@ function buildNodeBubble(node) {
   bubble.appendChild(divider());
 
   if (node.type === "table") {
-    [["addRow", "rowAdd", "Add a row"], ["dropRow", "rowDel", "Remove the last row"],
-     ["addCol", "colAdd", "Add a column"], ["dropCol", "colDel", "Remove the last column"]]
+    var pick = currentCell();
+    function span(a, b, one, many) { return a === b ? one + " " + (a + 1) : many + " " + (a + 1) + "–" + (b + 1); }
+    [["addRow", "rowAdd", "Add a row"],
+     ["dropRow", "rowDel", pick ? span(pick.r0, pick.r1, "Delete row", "Delete rows") : "Remove the last row"],
+     ["addCol", "colAdd", "Add a column"],
+     ["dropCol", "colDel", pick ? span(pick.c0, pick.c1, "Delete column", "Delete columns") : "Remove the last column"]]
       .forEach(function (a) {
         bubble.appendChild(toolButton({ icon: a[1], title: a[2], onClick: function () { editTables(a[0]); } }));
       });
