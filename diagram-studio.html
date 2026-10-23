@@ -267,6 +267,7 @@ svg#stage.texty { cursor: text; }
 .floating .divider { height: 17px; }
 
 .fmt-b { font-weight: 700; }
+.pen-dot { display: block; border-radius: 50%; }
 .fmt-i { font-style: italic; font-family: Georgia, serif; }
 .fmt-s { text-decoration: line-through; }
 .fmt-u { text-decoration: underline; }
@@ -599,6 +600,7 @@ var ICONS = {
   colAdd: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="2.5" width="6" height="13" rx="1.2"/><path d="M11.2 9 H16 M13.6 6.6 V11.4"/></g>',
   colDel: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="2.5" width="6" height="13" rx="1.2"/><path d="M11.2 9 H16"/></g>',
   sketch: '<g fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.6 5 L15.4 4.4 L15.2 13.2 L2.8 13.6 Z"/></g><g stroke="currentColor" stroke-width="0.9" opacity="0.55"><path d="M4 12.5 L7 6"/><path d="M7 12.5 L10 6"/><path d="M10 12.5 L13 6"/></g>',
+  pen: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.8 3.2 L14.8 6.2 L6.6 14.4 L3 15 L3.6 11.4 Z"/><path d="M10.4 4.6 L13.4 7.6"/></g>',
   text: '<path d="M3.5 4 H14.5 M9 4 V14.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   connect: '<g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 13 C5 5.5, 10 4, 14.5 5.5"/><path d="M11.5 4.2 L14.8 5.4 L13.4 8.6"/></g>',
   hand: '<g fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"><path d="M6.2 8.6V4.9a1 1 0 1 1 2 0v3.3M8.2 8.2V3.9a1 1 0 1 1 2 0v4.2M10.2 8.4V5a1 1 0 1 1 2 0v4.5M12.2 8.8c0-.9.4-1.4 1.1-1.4.6 0 1 .5 1 1.2v2.4c0 2.5-1.7 4.2-4.1 4.2-2.5 0-3.9-1.2-4.6-2.9L4 10.1c-.4-.8 0-1.4.7-1.7.6-.2 1.1.1 1.4.7l.5 1.1"/></g>',
@@ -704,6 +706,7 @@ var tool = "select";
 var connectFrom = null;
 var snapOn = true, gridOn = true, textureOn = true, guidesOn = true;
 var roughness = "medium";
+var penStyle = { color: "#23231F", weight: 3 };   /* what the next stroke looks like */
 var toneIndex = 0;
 var textBounds = {};
 var view = { x: 0, y: 0, w: 900, h: 660 };
@@ -792,7 +795,7 @@ function persistNow() {
   try {
     var picturesKept = persistAssets();
     localStorage.setItem(STORE, stateJSON());
-    localStorage.setItem(STORE + ":prefs", JSON.stringify({ roughness: roughness, textureOn: textureOn, snapOn: snapOn, gridOn: gridOn, guidesOn: guidesOn }));
+    localStorage.setItem(STORE + ":prefs", JSON.stringify({ roughness: roughness, textureOn: textureOn, snapOn: snapOn, gridOn: gridOn, guidesOn: guidesOn, pen: penStyle }));
     $("saved").textContent = (picturesKept ? "Saved " : "Saved without images ") +
       new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   } catch (err) { $("saved").textContent = "Not saved locally"; }
@@ -806,6 +809,7 @@ function loadPersisted() {
       snapOn = prefs.snapOn !== false;
       gridOn = prefs.gridOn !== false;
       guidesOn = prefs.guidesOn !== false;
+      if (prefs.pen && parseHex(prefs.pen.color)) penStyle = { color: parseHex(prefs.pen.color), weight: clamp(+prefs.pen.weight || 3, 0.5, 24) };
     }
     assets = JSON.parse(localStorage.getItem(STORE + ":assets") || "{}") || {};
     var raw = localStorage.getItem(STORE);
@@ -1425,8 +1429,149 @@ function drawImageNode(node) {
   setAttrs(hit, { x: node.x, y: node.y, width: node.w, height: node.h, fill: "transparent", cursor: "move" });
 }
 
+/* Pen drawings are nodes too, so they move, resize, connect, undo and
+   play like any shape. Each stroke is stored relative to the drawing's
+   box (0 to 1), which is what lets a drag on a corner stretch it. */
+function inkStrokes(node) {
+  return (node.strokes || []).map(function (st) {
+    var pts = [];
+    for (var i = 0; i + 1 < st.length; i += 2) pts.push({ x: node.x + st[i] * node.w, y: node.y + st[i + 1] * node.h });
+    return pts;
+  });
+}
+/* A smooth line through the points: quadratic curves between midpoints. */
+function smoothPath(pts) {
+  if (!pts.length) return "";
+  var f = function (v) { return v.toFixed(1); };
+  if (pts.length === 1) return "M" + f(pts[0].x) + "," + f(pts[0].y) + " l0.01,0";
+  var d = "M" + f(pts[0].x) + "," + f(pts[0].y);
+  for (var i = 1; i < pts.length - 1; i++) {
+    d += " Q" + f(pts[i].x) + "," + f(pts[i].y) + " " + f((pts[i].x + pts[i + 1].x) / 2) + "," + f((pts[i].y + pts[i + 1].y) / 2);
+  }
+  var last = pts[pts.length - 1];
+  return d + " L" + f(last.x) + "," + f(last.y);
+}
+function drawInkNode(node) {
+  var shapeGroup = keyedGroup("shapes", node.id, false);
+  keyedGroup("labels", node.id, false);
+  var d = inkStrokes(node).map(smoothPath).join(" ");
+  shapeGroup.appendChild(makeEl("path", {
+    d: d, fill: "none", stroke: node.accent, "stroke-width": node.weight || 3,
+    "stroke-linecap": "round", "stroke-linejoin": "round"
+  }));
+  /* the strokes themselves are the click target, not the empty box */
+  var hit = keyedHit(node.id, "path", "nodeId");
+  setAttrs(hit, { d: d, fill: "none", stroke: "transparent", "stroke-width": Math.max(14, (node.weight || 3) + 10), cursor: "move", "stroke-linecap": "round" });
+}
+
+/* Douglas-Peucker: drop points that sit on the line between their
+   neighbours, so a stroke keeps its shape at a fraction of the size. */
+function simplifyPoints(pts, tolerance) {
+  if (pts.length < 3) return pts;
+  var keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  (function walk(a, b) {
+    var dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y, len = Math.hypot(dx, dy), far = 0, at = -1;
+    for (var i = a + 1; i < b; i++) {
+      /* a closed loop starts and ends on the same spot, so measure from that spot */
+      var dist = len < 1e-6 ? Math.hypot(pts[i].x - pts[a].x, pts[i].y - pts[a].y)
+        : Math.abs(dy * pts[i].x - dx * pts[i].y + pts[b].x * pts[a].y - pts[b].y * pts[a].x) / len;
+      if (dist > far) { far = dist; at = i; }
+    }
+    if (far > tolerance) { keep[at] = 1; walk(a, at); walk(at, b); }
+  })(0, pts.length - 1);
+  return pts.filter(function (_, i) { return keep[i]; });
+}
+/* Rebuilds a drawing's box around absolute strokes and stores them
+   relative to it again. */
+function setInk(node, strokes) {
+  var all = [].concat.apply([], strokes);
+  var x0 = Math.min.apply(null, all.map(function (p) { return p.x; }));
+  var y0 = Math.min.apply(null, all.map(function (p) { return p.y; }));
+  var x1 = Math.max.apply(null, all.map(function (p) { return p.x; }));
+  var y1 = Math.max.apply(null, all.map(function (p) { return p.y; }));
+  node.x = Math.round(x0 * 10) / 10; node.y = Math.round(y0 * 10) / 10;
+  node.w = Math.max(1, x1 - x0); node.h = Math.max(1, y1 - y0);
+  node.strokes = strokes.map(function (pts) {
+    var flat = [];
+    pts.forEach(function (p) {
+      flat.push(+((p.x - node.x) / node.w).toFixed(4), +((p.y - node.y) / node.h).toFixed(4));
+    });
+    return flat;
+  });
+}
+
+/* Strokes started soon after the last one ended, and close to it, join
+   the same drawing. Anything else starts a new drawing. */
+var INK_JOIN_MS = 1500, INK_JOIN_GAP = 60;
+var lastInk = null;   /* { id, at } of the drawing the last stroke went into */
+
+function finishStroke(points) {
+  if (!points.length) return;
+  var k = viewScale();
+  var stroke = simplifyPoints(points, 0.6 / k);
+  var target = null;
+  if (lastInk && Date.now() - lastInk.at < INK_JOIN_MS) {
+    var prev = findNode(lastInk.id), first = points[0];
+    if (prev && prev.type === "ink" &&
+        first.x > prev.x - INK_JOIN_GAP && first.x < prev.x + prev.w + INK_JOIN_GAP &&
+        first.y > prev.y - INK_JOIN_GAP && first.y < prev.y + prev.h + INK_JOIN_GAP) target = prev;
+  }
+  if (target) {
+    setInk(target, inkStrokes(target).concat([stroke]));
+  } else {
+    target = makeNode("box", "wash", points[0]);
+    target.type = "ink";
+    target.accent = penStyle.color;
+    target.weight = penStyle.weight;
+    target.filled = false;
+    setInk(target, [stroke]);
+    nodes().push(target);
+  }
+  lastInk = { id: target.id, at: Date.now() };
+  commit(); render();
+}
+
+function buildInkBubble(node) {
+  bubble.appendChild(paletteRow(null, function (preset) { patchSelected({ accent: function (it) { return it.type === "ink" ? preset.accent : undefined; } }); }));
+  bubble.appendChild(colorControl(node.accent, "Ink colour", function (hex) {
+    patchSelected({ accent: function (it) { return it.type === "ink" ? hex : undefined; } });
+  }));
+  bubble.appendChild(divider());
+  bubble.appendChild(numberControl(node.weight || 3, 0.5, 24, "Line thickness", function (v) {
+    patchSelected({ weight: function (it) { return it.type === "ink" ? v : undefined; } });
+  }, 0.5));
+}
+/* While the pen is out and nothing is selected, the floating bar holds
+   the pen's own colour and thickness. */
+var PEN_SIZES = [[1.5, "Fine"], [3, "Medium"], [6, "Bold"]];
+function buildPenBar() {
+  bubble.appendChild(htmlEl("span", null, "Pen"));
+  bubble.appendChild(divider());
+  bubble.appendChild(paletteRow(null, function (preset) { penStyle.color = preset.accent; persistNow(); renderBubble(); }));
+  bubble.appendChild(colorControl(penStyle.color, "Pen colour", function (hex) { penStyle.color = hex; persistNow(); renderBubble(); }));
+  bubble.appendChild(divider());
+  PEN_SIZES.forEach(function (size) {
+    var b = toolButton({
+      title: size[1], pressed: penStyle.weight === size[0],
+      onClick: function () { penStyle.weight = size[0]; persistNow(); renderBubble(); }
+    });
+    var dot = htmlEl("span", "pen-dot");
+    dot.style.width = dot.style.height = (size[0] + 3) + "px";
+    dot.style.background = penStyle.color;
+    b.appendChild(dot);
+    bubble.appendChild(b);
+  });
+  bubble.appendChild(divider());
+  bubble.appendChild(toolButton({ label: "Done", title: "Put the pen down  (V)", onClick: function () { setTool("select"); } }));
+  var rect = bubble.getBoundingClientRect(), width = sheet.getBoundingClientRect().width;
+  bubble.style.left = Math.max(8, (width - rect.width) / 2) + "px";
+  bubble.style.top = "12px";
+}
+
 function drawNode(node) {
   if (node.type === "image") { drawImageNode(node); return; }
+  if (node.type === "ink") { drawInkNode(node); return; }
   var shapeGroup = keyedGroup("shapes", node.id, true);
   var labelGroup = keyedGroup("labels", node.id, false);
   var mid = center(node);
@@ -1760,6 +1905,12 @@ function drawOverlay() {
       "stroke-dasharray": (4 * k) + " " + (3 * k)
     }));
   }
+  if (drag && drag.type === "ink") {
+    overlay.appendChild(makeEl("path", {
+      d: smoothPath(drag.points), fill: "none", stroke: penStyle.color, "stroke-width": penStyle.weight,
+      "stroke-linecap": "round", "stroke-linejoin": "round"
+    }));
+  }
   if (drag && drag.type === "connect" && drag.preview) {
     overlay.appendChild(makeEl("path", {
       d: drag.preview, fill: "none", stroke: RED, "stroke-width": (1.5 * k).toFixed(2),
@@ -1789,7 +1940,7 @@ function drawOverlay() {
   /* anchor dots: on the hovered shape, or on everything while connecting */
   var anchorNodes = [];
   if (tool === "connect") anchorNodes = nodes();
-  else if (hoverNode && !drag) { var hv = findNode(hoverNode); if (hv) anchorNodes = [hv]; }
+  else if (hoverNode && !drag && tool !== "pen") { var hv = findNode(hoverNode); if (hv) anchorNodes = [hv]; }
   else if (drag && drag.type === "connect") { anchorNodes = nodes(); }
 
   anchorNodes.forEach(function (node) {
@@ -2316,9 +2467,10 @@ var TOOLS = [
   { id: "image",   icon: "image",   title: "Import an image", key: "I" },
   { sep: true },
   { id: "text",    icon: "text",    title: "Text",            key: "T" },
+  { id: "pen",     icon: "pen",     title: "Draw",            key: "P" },
   { id: "connect", icon: "connect", title: "Draw an arrow",   key: "C" }
 ];
-var SHORTCUT_TOOLS = { v: "select", h: "pan", b: "box", d: "diamond", s: "sketch", e: "ellipse", g: "table", t: "text", c: "connect" };
+var SHORTCUT_TOOLS = { v: "select", h: "pan", b: "box", d: "diamond", s: "sketch", e: "ellipse", g: "table", t: "text", c: "connect", p: "pen" };
 
 function toolShape(id) {
   if (id === "sketch") return { type: "box", style: "sketch" };
@@ -2337,15 +2489,19 @@ function setTool(next) {
   if (tool === "connect") setHint("Click an edge dot to start an arrow, then click one on the shape it points to.");
   else if (tool === "text") setHint("Click the sheet to drop some text.");
   else if (tool === "pan") setHint("Drag to move the sheet around.");
+  else if (tool === "pen") setHint("Draw on the canvas. Strokes made close together, one after another, stay one drawing. V or Esc to stop.");
   else if (toolShape(tool)) setHint("Click to place it, or drag to size it as you go.");
   else setHint("Double click a shape to type. Drag from an edge dot to draw an arrow.");
+  if (tool === "pen") { sel.clear(); closeEditor(true); }
+  lastInk = null;
   drawOverlay();
+  renderBubble();
 }
 var spaceDown = false;
 function updateCursor() {
   stage.classList.toggle("grabbing", !!(drag && drag.type === "pan" && (!drag.right || (rightPan && rightPan.moved))));
   stage.classList.toggle("grabby", !drag && (tool === "pan" || spaceDown));
-  stage.classList.toggle("crossy", tool === "connect" || !!toolShape(tool));
+  stage.classList.toggle("crossy", tool === "connect" || tool === "pen" || !!toolShape(tool));
   stage.classList.toggle("texty", tool === "text");
 }
 
@@ -2421,6 +2577,16 @@ stage.addEventListener("pointerdown", function (event) {
     stage.setPointerCapture(event.pointerId);
     updateCursor();
     event.preventDefault();
+    return;
+  }
+
+  /* The pen draws over anything, shapes included. */
+  if (tool === "pen") {
+    closeEditor(true);
+    sel.clear();
+    drag = { type: "ink", points: [point] };
+    stage.setPointerCapture(event.pointerId);
+    renderBubble();
     return;
   }
 
@@ -2556,7 +2722,7 @@ window.addEventListener("pointermove", function (event) {
     if (!node) return;
     var box = drag.box;
     var right = box.x + box.w, bottom = box.y + box.h;
-    var minW = MIN_W, minH = MIN_H;
+    var minW = node.type === "ink" ? 4 : MIN_W, minH = node.type === "ink" ? 4 : MIN_H;
     if (node.type === "table") {
       var ws = colWidths(node);
       minW = Math.max(MIN_W, Math.ceil(MIN_CELL_W * node.w / Math.min.apply(null, ws)));
@@ -2579,6 +2745,15 @@ window.addEventListener("pointermove", function (event) {
       if (drag.corner === "nw" || drag.corner === "ne") node.y = bottom - node.h;
     }
     renderCanvas();
+    return;
+  }
+
+  if (drag.type === "ink") {
+    var lastPt = drag.points[drag.points.length - 1];
+    if (Math.hypot(point.x - lastPt.x, point.y - lastPt.y) * viewScale() >= 1.5) {
+      drag.points.push(point);
+      drawOverlay();
+    }
     return;
   }
 
@@ -2728,6 +2903,7 @@ function endDrag(event) {
   if (d.type === "marquee") { render(); return; }
   if (d.type === "move" && !d.moved) { render(); return; }
   if (d.type === "col" && !d.moved) { render(); return; }
+  if (d.type === "ink") { finishStroke(d.points); return; }
 
   commit();
   render();
@@ -2803,17 +2979,17 @@ function defaultField(id, point) {
     var cell = point ? cellAt(f.item, point) : { r: 0, c: 0 };
     return cellField(cell.r, cell.c);
   }
-  if (f.kind === "node" && f.item.type === "image") return null;
+  if (f.kind === "node" && (f.item.type === "image" || f.item.type === "ink")) return null;
   return f.kind === "node" ? "title" : f.kind === "text" ? "text" : "label";
 }
 stage.addEventListener("dblclick", function (event) {
   var id = idFromTarget(event.target);
-  if (!id) return;
+  if (!id || tool === "pen") return;
   event.preventDefault();
   openEditor(id, defaultField(id, toStage(event)));
 });
 stage.addEventListener("pointerdown", function (event) {
-  if (event.button !== 0) return;
+  if (event.button !== 0 || tool === "pen") return;
   var id = idFromTarget(event.target);
   var now = Date.now();
   var point = toStage(event);
@@ -3448,6 +3624,7 @@ function buildImageBubble(node) {
 function renderBubble() {
   clear(bubble);
   var list = selList();
+  if (tool === "pen" && !list.length && !editing && !drag) { bubble.hidden = false; buildPenBar(); return; }
   if (!list.length || editing || (drag && drag.type !== "connect")) { bubble.hidden = true; return; }
   bubble.hidden = false;
 
@@ -3456,6 +3633,7 @@ function renderBubble() {
   } else {
     var found = list[0];
     if (found.kind === "node" && found.item.type === "image") buildImageBubble(found.item);
+    else if (found.kind === "node" && found.item.type === "ink") buildInkBubble(found.item);
     else if (found.kind === "node") buildNodeBubble(found.item);
     else if (found.kind === "edge") buildEdgeBubble(found.item);
     else buildTextBubble(found.item);
@@ -3929,6 +4107,7 @@ function itemName(id) {
     return { label: "Arrow: " + shortName(a) + " → " + shortName(b), icon: "connect", dim: true };
   }
   if (it.type === "image") return { label: "Image", icon: "image", dim: true };
+  if (it.type === "ink") return { label: "Drawing", icon: "pen", dim: true };
   if (it.type === "table") {
     var first = [].concat.apply([], it.cells).filter(Boolean)[0];
     return { label: first ? "Table: " + first : "Table", icon: "table", dim: !first };
@@ -4558,7 +4737,7 @@ function showShortcuts() {
     m.appendChild(htmlEl("p", "sub", "These all work while the sheet has focus."));
     var keys = htmlEl("div", "keys");
     [["V  H", "Select, pan"], ["B  D  S  E", "Box, diamond, inked, ellipse"], ["G", "Table"],
-     ["T", "Text"], ["C", "Draw an arrow"], ["I", "Import an image"], ["O", "Show or hide the reveal order"],
+     ["T", "Text"], ["C", "Draw an arrow"], ["P", "Pen: draw freehand"], ["I", "Import an image"], ["O", "Show or hide the reveal order"],
      [MOD + " + V", "Paste shapes, or a picture you copied"],
      ["Double click", "Type on a shape, arrow or label"], ["Enter", "Edit whatever is selected"],
      ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
