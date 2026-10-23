@@ -4021,7 +4021,7 @@ var revealTimers = [];
 function revealSteps() {
   var auto = revealOrder();
   var custom = page().reveal;
-  if (!custom) return { start: [], steps: auto.map(function (k) { return [{ id: k, hide: false }]; }), pauses: auto.map(function () { return 0; }), custom: false };
+  if (!custom) return { start: [], steps: auto.map(function (k) { return [{ id: k, hide: false }]; }), pauses: auto.map(function () { return 0; }), endPause: 0, custom: false };
   /* Steps hold entries: a plain id appears, { id, hide: true } disappears.
      Each item appears once and hides at most once, and only after it has
      appeared; anything that breaks that is dropped rather than played. */
@@ -4049,14 +4049,18 @@ function revealSteps() {
     if (kept.length) { steps.push(kept); pauses.push(Array.isArray(raw) ? 0 : clamp(+raw.pause || 0, 0, 60)); }
   });
   auto.forEach(function (k) { if (!seen.has(k)) { steps.push([{ id: k, hide: false }]); pauses.push(0); } });
-  return { start: start, steps: steps, pauses: pauses, custom: true };
+  /* end: seconds to hold once the last step is done, before Play
+     finishes and before an animated GIF starts over */
+  return { start: start, steps: steps, pauses: pauses, endPause: clamp(+custom.end || 0, 0, 60), custom: true };
 }
 function entryKey(e) { return e.hide ? e.id + "#hide" : e.id; }
 function stepIds(st) { return st.map(function (e) { return e.id; }); }
 
 /* Stores a reveal after checking that every hide comes in a later step
-   than its item's appearance. Returns false (and says why) if not. */
-function saveReveal(start, steps, pauses) {
+   than its item's appearance. Returns false (and says why) if not. The
+   end pause is kept as it is unless a new one is passed. */
+function saveReveal(start, steps, pauses, endPause) {
+  var end = endPause !== undefined ? endPause : clamp(+(page().reveal && page().reveal.end) || 0, 0, 60);
   pauses = (pauses || []).filter(function (p, i) { return steps[i] && steps[i].length; });
   steps = steps.filter(function (st) { return st.length; });
   var shownAt = {};
@@ -4079,6 +4083,7 @@ function saveReveal(start, steps, pauses) {
       return pauses[i] ? { pause: pauses[i], items: items } : items;
     })
   };
+  if (end) page().reveal.end = end;
   commit(); render();
   return true;
 }
@@ -4158,12 +4163,16 @@ function playReveal() {
       st.forEach(function (e) { setKeyOpacity(e.id, e.hide ? "0" : "1"); });
       markPlayingStep(index);
       if (index === plan.steps.length - 1) {
-        revealTimers = [];
-        hitsGroup.style.display = "";
-        setPlayButton();
-        markPlayingStep(-1);
-        revealHolding = anyHides;
-        setHint(anyHides ? "Reveal finished. Click the sheet to bring back what was hidden." : "Reveal finished.");
+        var finish = function () {
+          revealTimers = [];
+          hitsGroup.style.display = "";
+          setPlayButton();
+          markPlayingStep(-1);
+          revealHolding = anyHides;
+          setHint(anyHides ? "Reveal finished. Click the sheet to bring back what was hidden." : "Reveal finished.");
+        };
+        if (plan.endPause) revealTimers.push(setTimeout(finish, plan.endPause * 1000));
+        else finish();
       }
     }, at));
   });
@@ -4258,15 +4267,20 @@ function removeHide(id) {
   saveReveal(r.start, r.steps.map(function (st) { return st.filter(function (e) { return !(e.id === id && e.hide); }); }), r.pauses);
 }
 /* A pause is extra time, in seconds, waited before a step happens, on top
-   of the usual spacing set by the speed menu. */
+   of the usual spacing set by the speed menu. Index steps.length is the
+   pause after the last step. */
 function setPause(index, seconds) {
-  var r = revealSteps();
-  r.pauses[index] = clamp(Math.round((+seconds || 0) * 10) / 10, 0, 60);
+  var r = revealSteps(), v = clamp(Math.round((+seconds || 0) * 10) / 10, 0, 60);
+  if (index >= r.steps.length) { saveReveal(r.start, r.steps, r.pauses, v); return; }
+  r.pauses[index] = v;
   saveReveal(r.start, r.steps, r.pauses);
+}
+function pauseTitle(index) {
+  return index >= revealSteps().steps.length ? "Hold after the last step" : "Pause before step " + (index + 1);
 }
 function formatPause(seconds) { return (Math.round(seconds * 10) / 10) + "s"; }
 function pauseMenu(index, current, x, y) {
-  var items = [{ header: "Pause before step " + (index + 1) }];
+  var items = [{ header: pauseTitle(index) }];
   [0.5, 1, 2, 3, 5].forEach(function (v) {
     items.push({ label: formatPause(v), checked: current === v ? true : null, run: function () { setPause(index, v); } });
   });
@@ -4276,8 +4290,11 @@ function pauseMenu(index, current, x, y) {
 }
 function askPause(index, current) {
   openModal(function (m) {
-    m.appendChild(htmlEl("h2", null, "Pause before step " + (index + 1)));
-    m.appendChild(htmlEl("p", "sub", "Extra time to wait, on top of the usual spacing between steps."));
+    var atEnd = index >= revealSteps().steps.length;
+    m.appendChild(htmlEl("h2", null, pauseTitle(index)));
+    m.appendChild(htmlEl("p", "sub", atEnd
+      ? "Extra time to stay on the finished sheet. A GIF holds this long (plus its usual 2.5s) before it starts over."
+      : "Extra time to wait, on top of the usual spacing between steps."));
     var row = htmlEl("div");
     row.style.cssText = "display:flex;gap:8px;align-items:center";
     var input = numberControl(current || 2, 0, 60, "Seconds", function () {}, 0.1);
@@ -4400,6 +4417,7 @@ function renderOrderPanel() {
     entries.forEach(function (e) { list.appendChild(orderChip(e, hidden.has(e.id))); });
     card.appendChild(list);
 
+    var after = index + 1 < r.steps.length ? r.pauses[index + 1] : r.endPause;
     function stepMenu(x, y) {
       openMenuAt(x, y, [
         { label: "Move earlier", icon: "up", disabled: index === 0, run: function () { moveStep(index, -1); } },
@@ -4407,7 +4425,9 @@ function renderOrderPanel() {
         { label: "Split into separate steps", icon: "distV", disabled: entries.length < 2, run: function () { splitStep(index); } },
         "-",
         { label: r.pauses[index] ? "Change the pause before it…" : "Pause before this step…", icon: "pause",
-          run: function () { pauseMenu(index, r.pauses[index], x, y); } }
+          run: function () { pauseMenu(index, r.pauses[index], x, y); } },
+        { label: after ? "Change the pause after it…" : "Pause after this step…", icon: "pause",
+          run: function () { pauseMenu(index + 1, after, x, y); } }
       ]);
     }
     var tools = htmlEl("div", "step-tools");
@@ -4427,6 +4447,20 @@ function renderOrderPanel() {
     orderBody.appendChild(card);
   });
   var tail = htmlEl("div", "gap");
+  if (r.endPause && r.steps.length) {
+    tail.classList.add("has-pause");
+    var hold = htmlEl("button", "pause-pill");
+    hold.type = "button";
+    hold.appendChild(icon("pause", 12));
+    hold.appendChild(htmlEl("span", null, formatPause(r.endPause) + " hold at the end"));
+    hold.dataset.tip = "Change or remove the hold after the last step";
+    hold.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var rc = hold.getBoundingClientRect();
+      pauseMenu(r.steps.length, r.endPause, rc.left, rc.bottom + 4);
+    });
+    tail.appendChild(hold);
+  }
   dropTarget(tail, { kind: "gap", index: r.steps.length });
   orderBody.appendChild(tail);
 }
@@ -4729,7 +4763,7 @@ function gifPlan(opts) {
       frames.push({ visible: i + 1, partial: 0, delay: step });
     }
   });
-  frames[frames.length - 1].delay += 2500;
+  frames[frames.length - 1].delay += 2500 + plan.endPause * 1000;
   return { steps: steps, frames: frames };
 }
 function exportGif(opts, onProgress, onDone, onFail) {
