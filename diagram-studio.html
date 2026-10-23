@@ -2894,6 +2894,10 @@ function endDrag(event) {
       edges().push(makeEdge(d.fromId, d.fromSide, d.hot.id, d.hot.side));
       commit(); render();
       setHint("Arrow drawn. Double click it to add a label.");
+    } else if (point && Math.hypot(point.x - d.start.x, point.y - d.start.y) * viewScale() < 4) {
+      /* a click on an edge dot that goes nowhere picks the shape instead */
+      selectOnly(d.fromId);
+      render();
     } else {
       render();
     }
