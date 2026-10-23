@@ -322,6 +322,7 @@ input[type="color"] {
 .menu-item:hover:not(:disabled) { background: var(--pill); }
 .menu-item:disabled { color: var(--ink-soft); cursor: default; }
 .menu-item.danger:hover { background: var(--red-soft); color: var(--red); }
+.menu-item.on::after { content: "✓"; margin-left: auto; color: var(--red); font-weight: 600; }
 .menu-item .k { margin-left: auto; color: var(--ink-soft); font-size: 11px; }
 .menu-sep { height: 1px; background: var(--hair-2); margin: 5px 8px; }
 .menu-label { padding: 6px 9px 3px; font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); }
@@ -612,6 +613,9 @@ var ICONS = {
   table: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="13" height="11" rx="1.5"/><path d="M2.5 7.2 H15.5 M2.5 10.9 H15.5 M7 3.5 V14.5 M11.2 3.5 V14.5" stroke-width="1.1"/></g>',
   merge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M5.5 9 H12.5 M10.5 7 L12.5 9 L10.5 11 M7.5 7 L5.5 9 L7.5 11"/></g>',
   unmerge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M9 4 V14" stroke-dasharray="1.6 1.8"/><path d="M7 9 H4.5 M5.8 7.6 L4.4 9 L5.8 10.4 M11 9 H13.5 M12.2 7.6 L13.6 9 L12.2 10.4"/></g>',
+  vTop: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 3.5 H15"/><path d="M6 7 H12 M6 10 H12"/></g>',
+  vMid: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 9 H4.5 M13.5 9 H15" opacity=".5"/><path d="M6 7.5 H12 M6 10.5 H12"/></g>',
+  vBot: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 14.5 H15"/><path d="M6 8 H12 M6 11 H12"/></g>',
   rowAdd: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="3" width="13" height="6" rx="1.2"/><path d="M9 11.2 V16 M6.6 13.6 H11.4"/></g>',
   rowDel: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="3" width="13" height="6" rx="1.2"/><path d="M6.6 13.6 H11.4"/></g>',
   colAdd: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="2.5" width="6" height="13" rx="1.2"/><path d="M11.2 9 H16 M13.6 6.6 V11.4"/></g>',
@@ -1121,6 +1125,28 @@ function syncFills(node) {
   node.fills = node.cells.map(function (row, r) {
     return row.map(function (_, c) { return (old[r] && old[r][c]) || null; });
   });
+  /* Text alignment sits in the same kind of grid: a two letter code,
+     across (l, c, r) then down (t, m, b), or null for centred. */
+  var was = Array.isArray(node.aligns) ? node.aligns : [];
+  node.aligns = node.cells.map(function (row, r) {
+    return row.map(function (_, c) { var a = was[r] && was[r][c]; return /^[lcr][tmb]$/.test(a || "") ? a : null; });
+  });
+}
+function cellAlign(node, r, c) {
+  var a = node.aligns && node.aligns[r] && node.aligns[r][c];
+  return { h: a ? a[0] : "c", v: a ? a[1] : "m" };
+}
+/* Where a cell's text sits. Several lines stay a block, so top and bottom
+   move the whole block rather than its middle line. */
+var CELL_PAD = 6;
+function cellTextSpot(node, r, c, text, size) {
+  var box = cellBox(node, r, c), al = cellAlign(node, r, c);
+  var lines = String(text || "").split("\n").length, block = (lines - 1) * size * 1.25 / 2;
+  var x = al.h === "l" ? box.x + CELL_PAD : al.h === "r" ? box.x + box.w - CELL_PAD : box.x + box.w / 2;
+  var y = al.v === "t" ? box.y + CELL_PAD + size * 0.8 + block
+        : al.v === "b" ? box.y + box.h - CELL_PAD - size * 0.25 - block
+        : box.y + box.h / 2 + size * 0.35;
+  return { x: x, y: y, anchor: al.h === "l" ? "start" : al.h === "r" ? "end" : "middle", box: box, align: al };
 }
 function tableSize(node) {
   var rows = node.cells.length, cols = node.cells[0].length;
@@ -1761,10 +1787,10 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
     for (c = 0; c < t.cols; c++) {
       var text = node.cells[r][c];
       if (!text || isCovered(node, r, c)) continue;
-      var box = cellBox(node, r, c);
-      var cellFormat = Object.assign({}, format);
+      var spot = cellTextSpot(node, r, c, text, format.size);
+      var cellFormat = Object.assign({}, format, { anchor: spot.anchor });
       if (node.header && r === 0 && t.rows > 1) cellFormat.weight = 600;
-      labelGroup.appendChild(styledText(box.x + box.w / 2, box.y + box.h / 2 + format.size * 0.35, text, cellFormat));
+      labelGroup.appendChild(styledText(spot.x, spot.y, text, cellFormat));
     }
   }
 }
@@ -1937,6 +1963,45 @@ function pickIsOneRegion(cur) {
 }
 /* Merging keeps every bit of text, joined in reading order into the
    top-left cell, and the first colour found. */
+/* Aligns the picked cells, or every cell when the table was selected
+   without picking one. part is "h" or "v". */
+function alignCells(part, code) {
+  var cur = currentCell(), tables = cur ? [cur.node] : selNodes().filter(function (n) { return n.type === "table"; });
+  tables.forEach(function (n) {
+    if (!n.aligns) syncFills(n);
+    function set(r, c) {
+      var al = cellAlign(n, r, c);
+      if (part === "h") al.h = code; else al.v = code;
+      n.aligns[r][c] = al.h === "c" && al.v === "m" ? null : al.h + al.v;
+    }
+    if (cur) eachPickedCell(cur, set);
+    else n.cells.forEach(function (row, r) { row.forEach(function (_, c) { set(r, c); }); });
+  });
+  commit(); render();
+}
+function alignButton(node) {
+  var cur = currentCell(), cells = [];
+  if (cur) eachPickedCell(cur, function (r, c) { if (!isCovered(node, r, c)) cells.push(cellAlign(node, r, c)); });
+  else node.cells.forEach(function (row, r) { row.forEach(function (_, c) { if (!isCovered(node, r, c)) cells.push(cellAlign(node, r, c)); }); });
+  function all(part, code) { return cells.length > 0 && cells.every(function (a) { return a[part] === code; }); }
+  var h = all("h", "l") ? "alignLeft" : all("h", "r") ? "alignRight" : "alignCenter";
+  return toolButton({
+    icon: h, label: "Align", title: cur ? "Line up the text in these cells" : "Line up the text in every cell",
+    onClick: function (e, b) {
+      var rc = b.getBoundingClientRect();
+      openMenuAt(rc.left, rc.bottom + 6, [
+        { header: cur ? "Text in the picked cells" : "Text in every cell" },
+        { label: "Left", icon: "alignLeft", on: all("h", "l"), run: function () { alignCells("h", "l"); } },
+        { label: "Centre", icon: "alignCenter", on: all("h", "c"), run: function () { alignCells("h", "c"); } },
+        { label: "Right", icon: "alignRight", on: all("h", "r"), run: function () { alignCells("h", "r"); } },
+        "-",
+        { label: "Top", icon: "vTop", on: all("v", "t"), run: function () { alignCells("v", "t"); } },
+        { label: "Middle", icon: "vMid", on: all("v", "m"), run: function () { alignCells("v", "m"); } },
+        { label: "Bottom", icon: "vBot", on: all("v", "b"), run: function () { alignCells("v", "b"); } }
+      ]);
+    }
+  });
+}
 function mergePicked() {
   var cur = currentCell();
   if (!cur || (cur.r0 === cur.r1 && cur.c0 === cur.c1) || pickIsOneRegion(cur)) return;
@@ -2259,17 +2324,21 @@ function makeNode(type, style, at, tone) {
 /* Rows and columns keep their size, so the table grows or shrinks
    around them instead of squashing what is already there. */
 function addTableRow(node, at) {
+  if (!node.aligns) syncFills(node);
   var t = tableSize(node);
   var r = at == null ? t.rows : at;
   node.cells.splice(r, 0, node.cells[0].map(function () { return ""; }));
   node.fills.splice(r, 0, node.cells[0].map(function () { return null; }));
+  node.aligns.splice(r, 0, node.cells[0].map(function () { return null; }));
   node.h = Math.round(node.h + t.ch);
 }
 function addTableCol(node, at) {
+  if (!node.aligns) syncFills(node);
   var t = tableSize(node), ws = colWidths(node);
   var c = at == null ? t.cols : at, fresh = node.w / t.cols;
   node.cells.forEach(function (row) { row.splice(c, 0, ""); });
   node.fills.forEach(function (row) { row.splice(c, 0, null); });
+  node.aligns.forEach(function (row) { row.splice(c, 0, null); });
   ws.splice(c, 0, fresh);
   node.colW = ws.map(function (w) { return Math.round(w); });
   node.w = Math.round(node.w + fresh);
@@ -2278,14 +2347,16 @@ function editTables(change) {
   var list = selNodes().filter(function (n) { return n.type === "table"; });
   if (!list.length) return;
   list.forEach(function (n) {
+    if (!n.aligns) syncFills(n);
     var t = tableSize(n);
     if (change === "addRow") addTableRow(n);
     if (change === "addCol") addTableCol(n);
-    if (change === "dropRow" && t.rows > 1) { n.cells.pop(); n.fills.pop(); n.h = Math.max(MIN_H, Math.round(n.h - t.ch)); }
+    if (change === "dropRow" && t.rows > 1) { n.cells.pop(); n.fills.pop(); n.aligns.pop(); n.h = Math.max(MIN_H, Math.round(n.h - t.ch)); }
     if (change === "dropCol" && t.cols > 1) {
       var ws = colWidths(n), gone = ws.pop();
       n.cells.forEach(function (row) { row.pop(); });
       n.fills.forEach(function (row) { row.pop(); });
+      n.aligns.forEach(function (row) { row.pop(); });
       n.colW = ws.map(function (w) { return Math.round(w); });
       n.w = Math.max(MIN_W, Math.round(n.w - gone));
     }
@@ -2915,6 +2986,7 @@ stage.addEventListener("pointerdown", function (event) {
 
   if (!event.shiftKey) clearSel();
   connectFrom = null;
+  activeCell = null;   /* a table picked by marquee is picked whole, not by an old cell */
   drag = { type: "marquee", start: point, base: new Set(sel), add: event.shiftKey };
   marquee = { x: point.x, y: point.y, w: 0, h: 0 };
   stage.setPointerCapture(event.pointerId);
@@ -3297,8 +3369,11 @@ function layoutEditor() {
 
   if (cell) {
     var size = found.item.titleSize || 11.5;
-    var cb = cellBox(found.item, cell.r, cell.c);
-    spot = { x: cb.x + cb.w / 2, y: cb.y + cb.h / 2 + size * 0.35, width: Math.max(cb.w - 8, 40), size: size };
+    var at = cellTextSpot(found.item, cell.r, cell.c, inlineInput.value, size), cb = at.box;
+    spot = {
+      x: cb.x + cb.w / 2, y: at.align.v === "m" ? cb.y + cb.h / 2 : at.y - size * 0.35,
+      width: Math.max(cb.w - 8, 40), size: size, textAlign: at.align.h === "l" ? "left" : at.align.h === "r" ? "right" : "center"
+    };
   } else if (found.kind === "node") {
     var n = found.item, mid = center(n);
     spot = {
@@ -3328,6 +3403,7 @@ function layoutEditor() {
   inlineInput.style.height = (lines * fontPx * 1.3 + 10) + "px";
   inlineInput.style.fontWeight = found.item.bold ? 700 : 500;
   inlineInput.style.fontStyle = found.item.italic ? "italic" : "normal";
+  inlineInput.style.textAlign = spot.textAlign || "";
 }
 
 function applyEditor() {
@@ -3767,6 +3843,8 @@ function buildNodeBubble(node) {
       }
       bubble.appendChild(divider());
     }
+    bubble.appendChild(divider());
+    bubble.appendChild(alignButton(node));
     if (!evenColumns(node)) {
       bubble.appendChild(toolButton({
         label: "Even columns", title: "Make every column the same width",
@@ -4145,6 +4223,7 @@ function renderMenu(defs) {
     else { var pad = htmlEl("span"); pad.style.width = "16px"; b.appendChild(pad); }
     b.appendChild(htmlEl("span", null, d.label));
     if (d.key) b.appendChild(htmlEl("span", "k", d.key));
+    if (d.on) { b.classList.add("on"); b.setAttribute("aria-checked", "true"); }
     if (d.checked != null) {
       var mark = icon("eye", 14);
       mark.style.cssText = "margin-left:auto;opacity:" + (d.checked ? 1 : 0.18);
