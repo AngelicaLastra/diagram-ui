@@ -1449,19 +1449,29 @@ function renderCanvas() {
    11. Overlay: selection, handles, anchors, guides
    ================================================================ */
 var marquee = null, guides = [], ghost = null, drag = null, hoverNode = null;
-var activeCell = null;   /* { id, r, c } of the cell last clicked in a table */
+/* The cells picked in a table: r,c is where the pick started and r2,c2 is
+   where Shift+click stretched it to. */
+var activeCell = null;
 
+function pickCell(id, r, c) { activeCell = { id: id, r: r, c: c, r2: r, c2: c }; }
 function currentCell() {
   var list = selList();
   if (!activeCell || list.length !== 1 || list[0].item.id !== activeCell.id) return null;
-  var node = list[0].item, t = tableSize(node);
-  if (activeCell.r >= t.rows || activeCell.c >= t.cols) return null;
-  return { node: node, r: activeCell.r, c: activeCell.c };
+  var node = list[0].item, t = tableSize(node), a = activeCell;
+  if (Math.max(a.r, a.r2) >= t.rows || Math.max(a.c, a.c2) >= t.cols) return null;
+  return {
+    node: node,
+    r0: Math.min(a.r, a.r2), r1: Math.max(a.r, a.r2),
+    c0: Math.min(a.c, a.c2), c1: Math.max(a.c, a.c2)
+  };
+}
+function eachPickedCell(cur, visit) {
+  for (var r = cur.r0; r <= cur.r1; r++) for (var c = cur.c0; c <= cur.c1; c++) visit(r, c);
 }
 function setCellFill(hex) {
   var cur = currentCell();
   if (!cur) return;
-  cur.node.fills[cur.r][cur.c] = hex;
+  eachPickedCell(cur, function (r, c) { cur.node.fills[r][c] = hex; });
   commit(); render();
 }
 
@@ -1575,7 +1585,8 @@ function drawOverlay() {
 
   var cur = currentCell();
   if (cur) {
-    var cb = cellBox(cur.node, cur.r, cur.c);
+    var cb = cellBox(cur.node, cur.r0, cur.c0), end = cellBox(cur.node, cur.r1, cur.c1);
+    cb.w = end.x + end.w - cb.x; cb.h = end.y + end.h - cb.y;
     overlay.appendChild(makeEl("rect", {
       x: (cb.x + 2 * k).toFixed(1), y: (cb.y + 2 * k).toFixed(1),
       width: Math.max(1, cb.w - 4 * k).toFixed(1), height: Math.max(1, cb.h - 4 * k).toFixed(1),
@@ -2050,7 +2061,15 @@ stage.addEventListener("pointerdown", function (event) {
     var hitNode = d.nodeId ? findNode(d.nodeId) : null;
     if (hitNode && hitNode.type === "table") {
       var picked = cellAt(hitNode, point);
-      activeCell = { id: hitNode.id, r: picked.r, c: picked.c };
+      /* Shift+click inside the table already picked stretches the pick
+         instead of adding to the selection, the way a spreadsheet does. */
+      if (event.shiftKey && currentCell() && activeCell.id === hitNode.id) {
+        activeCell.r2 = picked.r; activeCell.c2 = picked.c;
+        afterSelect();
+        return;
+      }
+      pickCell(hitNode.id, picked.r, picked.c);
+      setHint("Shift+click another cell to pick a block of cells. Double click to type.");
     }
     if (event.shiftKey || event.metaKey || event.ctrlKey) selectToggle(hitId);
     else if (!sel.has(hitId)) selectOnly(hitId);
@@ -2344,7 +2363,7 @@ function openEditor(id, field) {
   sel = new Set([id]);
   tapOpening = false;
   var opening = parseCell(field);
-  if (opening) activeCell = { id: id, r: opening.r, c: opening.c };
+  if (opening) pickCell(id, opening.r, opening.c);
   editing = { id: id, kind: found.kind, field: field, before: stateJSON() };
 
   var cell = parseCell(field);
@@ -2600,13 +2619,18 @@ function buildNodeBubble(node) {
       });
     var cur = currentCell();
     if (cur) {
-      var now = cur.node.fills[cur.r][cur.c];
+      /* Show a colour only when every picked cell shares it. */
+      var shades = [];
+      eachPickedCell(cur, function (r, c) { shades.push(cur.node.fills[r][c]); });
+      var now = shades.every(function (f) { return f === shades[0]; }) ? shades[0] : null;
+      var many = shades.length > 1;
       bubble.appendChild(divider());
-      bubble.appendChild(htmlEl("span", null, "Cell"));
+      bubble.appendChild(htmlEl("span", null, many ? shades.length + " cells" : "Cell"));
       bubble.appendChild(paletteRow(now, function (preset) { setCellFill(preset.fill); }));
-      bubble.appendChild(colorControl(now || node.fill, "Any colour for this cell", setCellFill));
+      bubble.appendChild(colorControl(now || node.fill, many ? "Any colour for these cells" : "Any colour for this cell", setCellFill));
       bubble.appendChild(toolButton({
-        label: "Clear", title: "Take the colour off this cell", disabled: !now,
+        label: "Clear", title: many ? "Take the colour off these cells" : "Take the colour off this cell",
+        disabled: !shades.some(Boolean),
         onClick: function () { setCellFill(null); }
       }));
       bubble.appendChild(divider());
@@ -3320,7 +3344,7 @@ function showShortcuts() {
      ["Arrows", "Nudge by one"], ["Shift + arrows", "Nudge by ten"],
      ["Space + drag", "Pan the sheet"], ["Scroll", "Zoom around the pointer"],
      ["Shift + drag", "Keep a move on one axis"], ["Alt + place", "Keep the shape tool active"],
-     ["Shift + click", "Add to the selection"], ["?", "This list"]]
+     ["Shift + click", "Add to the selection, or stretch a table cell pick"], ["?", "This list"]]
       .forEach(function (row) {
         var d = htmlEl("div");
         d.appendChild(htmlEl("kbd", null, row[0]));
