@@ -487,8 +487,11 @@ var SHAPE_KINDS = [
   { type: "diamond", style: "wash",   label: "Diamond" },
   { type: "ellipse", style: "wash",   label: "Ellipse" },
   { type: "pill",    style: "wash",   label: "Pill" },
-  { type: "note",    style: "wash",   label: "Note" }
+  { type: "note",    style: "wash",   label: "Note" },
+  { type: "table",   style: "wash",   label: "Table" }
 ];
+var MIN_CELL_W = 40;
+var MIN_CELL_H = 22;
 
 /* Icons are literal strings. Nothing the user types ever reaches innerHTML. */
 var ICONS = {
@@ -498,6 +501,11 @@ var ICONS = {
   ellipse: '<ellipse cx="9" cy="9" rx="6.4" ry="4.6" fill="none" stroke="currentColor" stroke-width="1.5"/>',
   pill: '<rect x="2.2" y="5.4" width="13.6" height="7.2" rx="3.6" fill="none" stroke="currentColor" stroke-width="1.5"/>',
   note: '<path d="M3.4 3.6 h9.2 l3 3 v7.8 h-12.2 z M12.6 3.6 v3 h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>',
+  table: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="13" height="11" rx="1.5"/><path d="M2.5 7.2 H15.5 M2.5 10.9 H15.5 M7 3.5 V14.5 M11.2 3.5 V14.5" stroke-width="1.1"/></g>',
+  rowAdd: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="3" width="13" height="6" rx="1.2"/><path d="M9 11.2 V16 M6.6 13.6 H11.4"/></g>',
+  rowDel: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="3" width="13" height="6" rx="1.2"/><path d="M6.6 13.6 H11.4"/></g>',
+  colAdd: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="2.5" width="6" height="13" rx="1.2"/><path d="M11.2 9 H16 M13.6 6.6 V11.4"/></g>',
+  colDel: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="2.5" width="6" height="13" rx="1.2"/><path d="M11.2 9 H16"/></g>',
   sketch: '<g fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.6 5 L15.4 4.4 L15.2 13.2 L2.8 13.6 Z"/></g><g stroke="currentColor" stroke-width="0.9" opacity="0.55"><path d="M4 12.5 L7 6"/><path d="M7 12.5 L10 6"/><path d="M10 12.5 L13 6"/></g>',
   text: '<path d="M3.5 4 H14.5 M9 4 V14.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   connect: '<g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 13 C5 5.5, 10 4, 14.5 5.5"/><path d="M11.5 4.2 L14.8 5.4 L13.4 8.6"/></g>',
@@ -918,6 +926,34 @@ function cornersFor(node) {
    per segment, so those get a traced outline instead. */
 function isCurvy(node) { return node.type === "ellipse" || node.type === "pill"; }
 
+/* Tables split their box into equal rows and columns. A cell is edited
+   through the field name "cell:row:col". */
+function blankCells(rows, cols) {
+  var out = [];
+  for (var r = 0; r < rows; r++) { out.push([]); for (var c = 0; c < cols; c++) out[r].push(""); }
+  return out;
+}
+function tableSize(node) {
+  var rows = node.cells.length, cols = node.cells[0].length;
+  return { rows: rows, cols: cols, cw: node.w / cols, ch: node.h / rows };
+}
+function cellBox(node, r, c) {
+  var t = tableSize(node);
+  return { x: node.x + c * t.cw, y: node.y + r * t.ch, w: t.cw, h: t.ch };
+}
+function cellAt(node, point) {
+  var t = tableSize(node);
+  return {
+    r: clamp(Math.floor((point.y - node.y) / t.ch), 0, t.rows - 1),
+    c: clamp(Math.floor((point.x - node.x) / t.cw), 0, t.cols - 1)
+  };
+}
+function cellField(r, c) { return "cell:" + r + ":" + c; }
+function parseCell(field) {
+  var m = /^cell:(\d+):(\d+)$/.exec(field || "");
+  return m ? { r: +m[1], c: +m[2] } : null;
+}
+
 function anchorPoint(node, side) {
   var mid = center(node);
   if (side === "top")    return { x: mid.x, y: node.y };
@@ -1216,6 +1252,67 @@ function drawNode(node) {
     bold: node.bold, italic: node.italic, strike: node.strike, underline: node.underline,
     weight: 500, anchor: "middle"
   };
+
+  if (node.type === "table") {
+    drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format);
+  } else {
+    drawNodeLabels(node, labelGroup, mid, format);
+  }
+
+  var hit = keyedHit(node.id, "rect", "nodeId");
+  setAttrs(hit, { x: node.x, y: node.y, width: node.w, height: node.h, fill: "transparent", cursor: "move" });
+}
+
+/* Inner rules are drawn one stroke each, like the outline, so they run a
+   little past the border the way a ruled-by-hand table does. */
+function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
+  var t = tableSize(node);
+  var ink = { fill: "none", stroke: node.accent, "stroke-linecap": "round" };
+  var r, c;
+
+  if (node.header && t.rows > 1) {
+    var band = cellBox(node, 0, 0);
+    band.w = node.w;
+    shapeGroup.appendChild(makeEl("path", {
+      d: wobblyPath(cornersFor(band), jitter * 0.6, random),
+      fill: node.accent, "fill-opacity": node.filled ? 0.22 : 0.12
+    }));
+  }
+  if (node.style !== "sketch") {
+    shapeGroup.appendChild(makeEl("path", Object.assign({
+      d: wobblyPath(cornersFor(node), jitter * 0.5, random),
+      "stroke-width": 1.4, "stroke-opacity": 0.55
+    }, ink)));
+  }
+  for (r = 1; r < t.rows; r++) {
+    var y = node.y + r * t.ch;
+    var strong = node.header && r === 1;
+    shapeGroup.appendChild(makeEl("path", Object.assign({
+      d: sidePath({ x: node.x, y: y }, { x: node.x + node.w, y: y }, jitter * 0.5, random),
+      "stroke-width": strong ? 2 : 1.2, "stroke-opacity": strong ? 0.85 : 0.6
+    }, ink)));
+  }
+  for (c = 1; c < t.cols; c++) {
+    var x = node.x + c * t.cw;
+    shapeGroup.appendChild(makeEl("path", Object.assign({
+      d: sidePath({ x: x, y: node.y }, { x: x, y: node.y + node.h }, jitter * 0.5, random),
+      "stroke-width": 1.2, "stroke-opacity": 0.6
+    }, ink)));
+  }
+
+  for (r = 0; r < t.rows; r++) {
+    for (c = 0; c < t.cols; c++) {
+      var text = node.cells[r][c];
+      if (!text) continue;
+      var box = cellBox(node, r, c);
+      var cellFormat = Object.assign({}, format);
+      if (node.header && r === 0 && t.rows > 1) cellFormat.weight = 600;
+      labelGroup.appendChild(styledText(box.x + box.w / 2, box.y + box.h / 2 + format.size * 0.35, text, cellFormat));
+    }
+  }
+}
+
+function drawNodeLabels(node, labelGroup, mid, format) {
   labelGroup.appendChild(styledText(mid.x, node.sub ? mid.y - 3 : mid.y + 4, node.title, format));
 
   if (node.sub) {
@@ -1224,9 +1321,6 @@ function drawNode(node) {
       color: INK_SOFT, italic: node.italic, anchor: "middle"
     }));
   }
-
-  var hit = keyedHit(node.id, "rect", "nodeId");
-  setAttrs(hit, { x: node.x, y: node.y, width: node.w, height: node.h, fill: "transparent", cursor: "move" });
 }
 
 function drawEdge(edge) {
@@ -1559,22 +1653,52 @@ function toneFor(index) { return PRESETS[index % PRESETS.length]; }
 
 function makeNode(type, style, at, tone) {
   var preset = tone || toneFor(toneIndex);
-  var wide = type === "diamond" ? 160 : type === "ellipse" ? 150 : 170;
-  var tall = type === "diamond" ? 88 : type === "ellipse" ? 84 : type === "pill" ? 48 : 54;
-  return {
+  var wide = type === "diamond" ? 160 : type === "ellipse" ? 150 : type === "table" ? 270 : 170;
+  var tall = type === "diamond" ? 88 : type === "ellipse" ? 84 : type === "pill" ? 48 : type === "table" ? 96 : 54;
+  var node = {
     id: uid("n"), type: type, style: style,
     x: snap(at.x - wide / 2), y: snap(at.y - tall / 2), w: wide, h: tall,
     fill: preset.fill, accent: preset.accent, filled: true,
     title: "", sub: "", titleSize: 11.5, titleColor: INK,
     bold: false, italic: false, strike: false, underline: false
   };
+  if (type === "table") { node.cells = blankCells(3, 3); node.header = true; }
+  return node;
+}
+
+/* Rows and columns keep their size, so the table grows or shrinks
+   around them instead of squashing what is already there. */
+function addTableRow(node, at) {
+  var t = tableSize(node);
+  node.cells.splice(at == null ? t.rows : at, 0, node.cells[0].map(function () { return ""; }));
+  node.h = Math.round(node.h + t.ch);
+}
+function addTableCol(node, at) {
+  var t = tableSize(node);
+  node.cells.forEach(function (row) { row.splice(at == null ? t.cols : at, 0, ""); });
+  node.w = Math.round(node.w + t.cw);
+}
+function editTables(change) {
+  var list = selNodes().filter(function (n) { return n.type === "table"; });
+  if (!list.length) return;
+  list.forEach(function (n) {
+    var t = tableSize(n);
+    if (change === "addRow") addTableRow(n);
+    if (change === "addCol") addTableCol(n);
+    if (change === "dropRow" && t.rows > 1) { n.cells.pop(); n.h = Math.max(MIN_H, Math.round(n.h - t.ch)); }
+    if (change === "dropCol" && t.cols > 1) {
+      n.cells.forEach(function (row) { row.pop(); });
+      n.w = Math.max(MIN_W, Math.round(n.w - t.cw));
+    }
+  });
+  commit(); render();
 }
 function addNode(type, style, at, tone) {
   var node = makeNode(type, style, at, tone);
   nodes().push(node);
   toneIndex += 1;
   commit(); render(); selectOnly(node.id);
-  openEditorSoon(node.id, "title");
+  openEditorSoon(node.id, defaultField(node.id));
   return node;
 }
 function addFreeText(at) {
@@ -1730,15 +1854,16 @@ var TOOLS = [
   { id: "diamond", icon: "diamond", title: "Diamond",         key: "D" },
   { id: "sketch",  icon: "sketch",  title: "Inked box",       key: "S" },
   { id: "ellipse", icon: "ellipse", title: "Ellipse",         key: "E" },
+  { id: "table",   icon: "table",   title: "Table",           key: "G" },
   { sep: true },
   { id: "text",    icon: "text",    title: "Text",            key: "T" },
   { id: "connect", icon: "connect", title: "Draw an arrow",   key: "C" }
 ];
-var SHORTCUT_TOOLS = { v: "select", h: "pan", b: "box", d: "diamond", s: "sketch", e: "ellipse", t: "text", c: "connect" };
+var SHORTCUT_TOOLS = { v: "select", h: "pan", b: "box", d: "diamond", s: "sketch", e: "ellipse", g: "table", t: "text", c: "connect" };
 
 function toolShape(id) {
   if (id === "sketch") return { type: "box", style: "sketch" };
-  if (id === "box" || id === "diamond" || id === "ellipse" || id === "pill" || id === "note") {
+  if (id === "box" || id === "diamond" || id === "ellipse" || id === "pill" || id === "note" || id === "table") {
     return { type: id, style: "wash" };
   }
   return null;
@@ -1939,17 +2064,22 @@ window.addEventListener("pointermove", function (event) {
     if (!node) return;
     var box = drag.box;
     var right = box.x + box.w, bottom = box.y + box.h;
+    var minW = MIN_W, minH = MIN_H;
+    if (node.type === "table") {
+      minW = Math.max(MIN_W, node.cells[0].length * MIN_CELL_W);
+      minH = Math.max(MIN_H, node.cells.length * MIN_CELL_H);
+    }
     if (drag.corner === "nw" || drag.corner === "sw") {
-      node.x = Math.min(snap(point.x), right - MIN_W);
+      node.x = Math.min(snap(point.x), right - minW);
       node.w = right - node.x;
     } else {
-      node.w = Math.max(MIN_W, snap(point.x) - box.x);
+      node.w = Math.max(minW, snap(point.x) - box.x);
     }
     if (drag.corner === "nw" || drag.corner === "ne") {
-      node.y = Math.min(snap(point.y), bottom - MIN_H);
+      node.y = Math.min(snap(point.y), bottom - minH);
       node.h = bottom - node.y;
     } else {
-      node.h = Math.max(MIN_H, snap(point.y) - box.y);
+      node.h = Math.max(minH, snap(point.y) - box.y);
     }
     renderCanvas();
     return;
@@ -2038,6 +2168,10 @@ function endDrag(event) {
       node = makeNode(d.shape.type, d.shape.style, { x: ghost.x + ghost.w / 2, y: ghost.y + ghost.h / 2 });
       node.x = snap(ghost.x); node.y = snap(ghost.y);
       node.w = Math.max(MIN_W, snap(ghost.w)); node.h = Math.max(MIN_H, snap(ghost.h));
+      if (node.type === "table") {
+        node.w = Math.max(node.w, node.cells[0].length * MIN_CELL_W);
+        node.h = Math.max(node.h, node.cells.length * MIN_CELL_H);
+      }
     } else {
       node = makeNode(d.shape.type, d.shape.style, at);
     }
@@ -2045,7 +2179,7 @@ function endDrag(event) {
     nodes().push(node); toneIndex += 1;
     commit(); render(); selectOnly(node.id);
     if (!(event && event.altKey)) setTool("select");
-    openEditorSoon(node.id, "title");
+    openEditorSoon(node.id, defaultField(node.id));
     return;
   }
   ghost = null;
@@ -2112,16 +2246,20 @@ function idFromTarget(t) {
   var d = t.dataset || {};
   return d.nodeId || d.edgeId || d.textId || d.handleEdge || d.anchorNode || null;
 }
-function defaultField(id) {
+function defaultField(id, point) {
   var f = findAny(id);
   if (!f) return null;
+  if (f.kind === "node" && f.item.type === "table") {
+    var cell = point ? cellAt(f.item, point) : { r: 0, c: 0 };
+    return cellField(cell.r, cell.c);
+  }
   return f.kind === "node" ? "title" : f.kind === "text" ? "text" : "label";
 }
 stage.addEventListener("dblclick", function (event) {
   var id = idFromTarget(event.target);
   if (!id) return;
   event.preventDefault();
-  openEditor(id, defaultField(id));
+  openEditor(id, defaultField(id, toStage(event)));
 });
 stage.addEventListener("pointerdown", function (event) {
   if (event.button !== 0) return;
@@ -2130,7 +2268,8 @@ stage.addEventListener("pointerdown", function (event) {
   if (id && lastTap.id === id && now - lastTap.t < 520 && !editing) {
     lastTap = { id: null, t: 0 };
     tapOpening = true;
-    window.setTimeout(function () { openEditor(id, defaultField(id)); }, 0);
+    var point = toStage(event);
+    window.setTimeout(function () { openEditor(id, defaultField(id, point)); }, 0);
   } else {
     lastTap = { id: id, t: now };
   }
@@ -2149,7 +2288,9 @@ function openEditor(id, field) {
   tapOpening = false;
   editing = { id: id, kind: found.kind, field: field, before: stateJSON() };
 
-  var value = found.kind === "node" ? (field === "sub" ? (found.item.sub || "") : (found.item.title || ""))
+  var cell = parseCell(field);
+  var value = cell ? (found.item.cells[cell.r][cell.c] || "")
+            : found.kind === "node" ? (field === "sub" ? (found.item.sub || "") : (found.item.title || ""))
             : found.kind === "text" ? found.item.text
             : (found.item.label || "");
 
@@ -2158,8 +2299,8 @@ function openEditor(id, field) {
   layoutEditor();
   drawOverlay(); renderBubble();
   window.requestAnimationFrame(function () { inlineInput.focus(); inlineInput.select(); });
-  setHint(found.kind === "node"
-    ? "Typing. Tab swaps between the title and the caption, Esc finishes."
+  setHint(cell ? "Typing in a cell. Tab moves to the next one, Shift+Enter starts a new line, Esc finishes."
+    : found.kind === "node" ? "Typing. Tab swaps between the title and the caption, Esc finishes."
     : "Typing. Esc finishes.");
 }
 
@@ -2168,8 +2309,13 @@ function layoutEditor() {
   var found = findAny(editing.id);
   if (!found) return closeEditor(true);
   var k = viewScale(), spot;
+  var cell = parseCell(editing.field);
 
-  if (found.kind === "node") {
+  if (cell) {
+    var size = found.item.titleSize || 11.5;
+    var cb = cellBox(found.item, cell.r, cell.c);
+    spot = { x: cb.x + cb.w / 2, y: cb.y + cb.h / 2 + size * 0.35, width: Math.max(cb.w - 8, 40), size: size };
+  } else if (found.kind === "node") {
     var n = found.item, mid = center(n);
     spot = {
       x: mid.x, y: editing.field === "sub" ? mid.y + 9 : (n.sub ? mid.y - 3 : mid.y + 4),
@@ -2205,7 +2351,10 @@ function applyEditor() {
   var found = findAny(editing.id);
   if (!found) return;
   var value = inlineInput.value;
-  if (found.kind === "node") {
+  var cell = parseCell(editing.field);
+  if (cell) {
+    found.item.cells[cell.r][cell.c] = value;
+  } else if (found.kind === "node") {
     if (editing.field === "sub") found.item.sub = value; else found.item.title = value;
   } else if (found.kind === "text") {
     found.item.text = value;
@@ -2234,8 +2383,13 @@ inlineInput.addEventListener("keydown", function (event) {
   event.stopPropagation();
   if (event.key === "Escape") { event.preventDefault(); closeEditor(); return; }
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); closeEditor(); return; }
-  if (event.key === "Enter" && !event.shiftKey && editing && editing.kind !== "node") {
+  if (event.key === "Enter" && !event.shiftKey && editing && (editing.kind !== "node" || parseCell(editing.field))) {
     event.preventDefault(); closeEditor(); return;
+  }
+  if (event.key === "Tab" && editing && parseCell(editing.field)) {
+    event.preventDefault();
+    moveCell(event.shiftKey ? -1 : 1);
+    return;
   }
   if (event.key === "Tab" && editing && editing.kind === "node") {
     event.preventDefault();
@@ -2245,6 +2399,19 @@ inlineInput.addEventListener("keydown", function (event) {
   }
 });
 inlineInput.addEventListener("blur", function () { if (editing) closeEditor(); });
+
+/* Tab walks the cells in reading order. Tabbing out of the last cell adds
+   a fresh row, the way a spreadsheet does. */
+function moveCell(step) {
+  var id = editing.id, cell = parseCell(editing.field);
+  var node = findNode(id), t = tableSize(node);
+  var index = cell.r * t.cols + cell.c + step;
+  if (index < 0) return;
+  closeEditor();
+  node = findNode(id);
+  if (index >= t.rows * t.cols) { addTableRow(node); commit(); render(); }
+  openEditor(id, cellField(Math.floor(index / t.cols), index % t.cols));
+}
 
 /* ================================================================
    18. Small UI builders
@@ -2361,9 +2528,21 @@ function buildNodeBubble(node) {
   bubble.appendChild(colorControl(node.accent, "Ink colour", function (hex) { patchSelected({ accent: hex }); }));
   bubble.appendChild(divider());
 
-  bubble.appendChild(selectControl([
-    ["box", "Box"], ["diamond", "Diamond"], ["ellipse", "Ellipse"], ["pill", "Pill"], ["note", "Note"]
-  ], node.type, "Shape", function (v) { patchSelected({ type: v }); }));
+  if (node.type === "table") {
+    [["addRow", "rowAdd", "Add a row"], ["dropRow", "rowDel", "Remove the last row"],
+     ["addCol", "colAdd", "Add a column"], ["dropCol", "colDel", "Remove the last column"]]
+      .forEach(function (a) {
+        bubble.appendChild(toolButton({ icon: a[1], title: a[2], onClick: function () { editTables(a[0]); } }));
+      });
+    bubble.appendChild(toolButton({
+      label: "Header", title: "Shade the first row", pressed: !!node.header,
+      onClick: function () { patchSelected({ header: function (it) { return it.type === "table" ? !it.header : undefined; } }); }
+    }));
+  } else {
+    bubble.appendChild(selectControl([
+      ["box", "Box"], ["diamond", "Diamond"], ["ellipse", "Ellipse"], ["pill", "Pill"], ["note", "Note"]
+    ], node.type, "Shape", function (v) { patchSelected({ type: v }); }));
+  }
   bubble.appendChild(divider());
 
   bubble.appendChild(formatToggles(function () { return selNodes(); }));
@@ -2568,6 +2747,16 @@ function stencilPreview(kind) {
       d: wobblyPath(corners, 1.5, random), fill: "currentColor", "fill-opacity": 0.12,
       stroke: "currentColor", "stroke-width": 1.4, "stroke-linecap": "round"
     }));
+  }
+  if (kind.type === "table") {
+    [[{ x: 6, y: 12 }, { x: 50, y: 12 }], [{ x: 6, y: 19.5 }, { x: 50, y: 19.5 }],
+     [{ x: 20.5, y: 5 }, { x: 20.5, y: 27 }], [{ x: 35.5, y: 5 }, { x: 35.5, y: 27 }]]
+      .forEach(function (l) {
+        svg.appendChild(makeEl("path", {
+          d: sidePath(l[0], l[1], 0.8, random), fill: "none",
+          stroke: "currentColor", "stroke-width": 1, "stroke-opacity": 0.7, "stroke-linecap": "round"
+        }));
+      });
   }
   return svg;
 }
@@ -2975,6 +3164,9 @@ function upgradeNode(n) {
     bold: false, italic: false, strike: false, underline: false
   }, n);
   if (!o.fill) { o.fill = PRESETS[0].fill; o.accent = PRESETS[0].accent; }
+  if (o.type === "table" && !(Array.isArray(o.cells) && o.cells.length && o.cells[0].length)) {
+    o.cells = blankCells(3, 3);
+  }
   return o;
 }
 function upgradeEdge(e) {
@@ -3040,10 +3232,10 @@ function showShortcuts() {
     m.appendChild(htmlEl("h2", null, "Keyboard shortcuts"));
     m.appendChild(htmlEl("p", "sub", "These all work while the sheet has focus."));
     var keys = htmlEl("div", "keys");
-    [["V  H", "Select, pan"], ["B  D  S  E", "Box, diamond, inked, ellipse"],
+    [["V  H", "Select, pan"], ["B  D  S  E", "Box, diamond, inked, ellipse"], ["G", "Table"],
      ["T", "Text"], ["C", "Draw an arrow"],
      ["Double click", "Type on a shape, arrow or label"], ["Enter", "Edit whatever is selected"],
-     ["Tab", "Swap between title and caption"], ["Esc", "Finish typing, or clear the selection"],
+     ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
      [MOD + " + Z", "Undo"], [MOD + " + Shift + Z", "Redo"],
      [MOD + " + C  V  X", "Copy, paste, cut"], [MOD + " + D", "Duplicate"],
      [MOD + " + A", "Select everything"], ["Delete", "Remove the selection"],
