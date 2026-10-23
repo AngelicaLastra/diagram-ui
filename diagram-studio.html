@@ -3665,6 +3665,94 @@ function buildNodeBubble(node) {
   bubble.appendChild(divider());
   buildTextLook([node]);
 }
+function buildEdgeBubble(edge) {
+  [["curve", "routeCurve", "Curved"], ["elbow", "routeElbow", "Right angles"], ["straight", "routeStraight", "Straight"]]
+    .forEach(function (r) {
+      bubble.appendChild(toolButton({
+        icon: r[1], title: r[2], pressed: edge.shape === r[0],
+        onClick: function () { patchSelected({ shape: r[0] }); }
+      }));
+    });
+  bubble.appendChild(divider());
+
+  bubble.appendChild(toolButton({
+    icon: edge.dashed ? "dashed" : "solid", title: "Solid or dashed",
+    onClick: function () { patchSelected({ dashed: function (it) { return !it.dashed; } }); }
+  }));
+  bubble.appendChild(colorControl(edge.color || LINE, "Line colour", function (hex) { patchSelected({ color: hex }); }));
+  bubble.appendChild(numberControl(edge.weight || 1.6, 0.5, 8, "Line width",
+    function (v) { patchSelected({ weight: v }); }, 0.1));
+
+  if (edge.shape === "curve") {
+    bubble.appendChild(numberControl(Math.round(edge.pull || 60), 0, 400, "How far it bows",
+      function (v) { patchSelected({ pull: v, o1: undefined, o2: undefined }); }));
+    bubble.appendChild(toolButton({
+      label: "Reset bend", title: "Put the curve back to its default",
+      onClick: function () {
+        selList().filter(function (f) { return f.kind === "edge"; }).forEach(function (f) {
+          delete f.item.o1; delete f.item.o2; delete f.item.pull;
+        });
+        commit(); render();
+      }
+    }));
+  } else if (edge.shape === "elbow") {
+    bubble.appendChild(numberControl(edge.detour || 0, -600, 600, "Detour",
+      function (v) { patchSelected({ detour: v }); }));
+  }
+  bubble.appendChild(divider());
+
+  bubble.appendChild(selectControl(SIDES.concat(["auto"]).map(function (s) { return [s, s]; }),
+    edge.fromSide || "auto", "Leaves from", function (v) { patchSelected({ fromSide: v }); }));
+  bubble.appendChild(selectControl(SIDES.concat(["auto"]).map(function (s) { return [s, s]; }),
+    edge.toSide || "auto", "Arrives at", function (v) { patchSelected({ toSide: v }); }));
+  bubble.appendChild(toolButton({
+    label: "Flip", title: "Turn the arrow around",
+    onClick: function () {
+      selList().filter(function (f) { return f.kind === "edge"; }).forEach(function (f) {
+        var e = f.item;
+        var a = e.from, as = e.fromSide;
+        e.from = e.to; e.fromSide = e.toSide;
+        e.to = a; e.toSide = as;
+        delete e.o1; delete e.o2;
+      });
+      commit(); render();
+    }
+  }));
+  bubble.appendChild(divider());
+
+  if (edge.label) {
+    bubble.appendChild(toolButton({
+      icon: edge.onPath ? "labelPath" : "labelFlat",
+      title: edge.onPath ? "Label rides the line" : "Label sits flat",
+      onClick: function () { patchSelected({ onPath: function (it) { return !it.onPath; } }); }
+    }));
+    bubble.appendChild(numberControl(edge.labelSize || 9.5, 5, 40, "Label size",
+      function (v) { patchSelected({ labelSize: v }); }, 0.5));
+  } else {
+    bubble.appendChild(toolButton({
+      label: "Add label", title: "Put a word on this arrow",
+      onClick: function () { openEditor(edge.id, "label"); }
+    }));
+  }
+}
+function buildTextBubble(item) {
+  bubble.appendChild(numberControl(item.size, 6, 96, "Font size",
+    function (v) { patchSelected({ size: v }); }, 0.5));
+  bubble.appendChild(colorControl(item.color, "Text colour", function (hex) { patchSelected({ color: hex }); }));
+  bubble.appendChild(divider());
+  bubble.appendChild(formatToggles(function () {
+    return selList().filter(function (f) { return f.kind === "text"; }).map(function (f) { return f.item; });
+  }));
+  bubble.appendChild(divider());
+  [["start", "alignLeft", "Left"], ["middle", "alignCenter", "Centre"], ["end", "alignRight", "Right"]]
+    .forEach(function (a) {
+      bubble.appendChild(toolButton({
+        icon: a[1], title: a[2], pressed: item.anchor === a[0],
+        onClick: function () { patchSelected({ anchor: a[0] }); }
+      }));
+    });
+}
+
 /* Several things selected: the same look and font controls as a single
    shape, applied to everything they fit, with alignment folded into one
    menu so the bar stays a sensible length. */
