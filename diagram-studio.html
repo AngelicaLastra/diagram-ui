@@ -2298,7 +2298,12 @@ function openEditor(id, field) {
   inlineInput.hidden = false;
   layoutEditor();
   drawOverlay(); renderBubble();
-  window.requestAnimationFrame(function () { inlineInput.focus(); inlineInput.select(); });
+  /* Focus right away so keys typed straight after a Tab land in the box,
+     then again next frame in case a pointerdown takes focus back. */
+  inlineInput.focus(); inlineInput.select();
+  window.requestAnimationFrame(function () {
+    if (editing && document.activeElement !== inlineInput) { inlineInput.focus(); inlineInput.select(); }
+  });
   setHint(cell ? "Typing in a cell. Tab moves to the next one, Shift+Enter starts a new line, Esc finishes."
     : found.kind === "node" ? "Typing. Tab swaps between the title and the caption, Esc finishes."
     : "Typing. Esc finishes.");
