@@ -243,6 +243,8 @@ svg#stage.crossy { cursor: crosshair; }
 svg#stage.texty { cursor: text; }
 
 .no-texture #shapes g[data-key] { filter: none !important; }
+#overlay .col-grip { fill: transparent; cursor: col-resize; }
+#overlay .col-grip:hover, #overlay .col-grip.live { fill: rgba(221, 75, 68, 0.28); }
 #shapes g[data-key], #labels g[data-key] { transition: opacity 200ms ease; }
 #overlay { pointer-events: none; }
 #overlay .grab { pointer-events: all; }
@@ -571,7 +573,7 @@ var SHAPE_KINDS = [
   { type: "note",    style: "wash",   label: "Note" },
   { type: "table",   style: "wash",   label: "Table" }
 ];
-var MIN_CELL_W = 40;
+var MIN_CELL_W = 28;
 var MIN_CELL_H = 22;
 
 /* Icons are literal strings. Nothing the user types ever reaches innerHTML. */
@@ -1087,18 +1089,36 @@ function syncFills(node) {
 }
 function tableSize(node) {
   var rows = node.cells.length, cols = node.cells[0].length;
-  return { rows: rows, cols: cols, cw: node.w / cols, ch: node.h / rows };
+  return { rows: rows, cols: cols, ch: node.h / rows };
+}
+/* Column widths are kept as weights (colW), so resizing the whole table
+   scales every column, while dragging one column line changes just that
+   column. Tables without weights have even columns. */
+function colWidths(node) {
+  var cols = node.cells[0].length, weights = node.colW;
+  var usable = Array.isArray(weights) && weights.length === cols &&
+               weights.every(function (v) { return v > 0; });
+  if (!usable) weights = node.cells[0].map(function () { return 1; });
+  var sum = weights.reduce(function (a, b) { return a + b; }, 0);
+  return weights.map(function (v) { return node.w * v / sum; });
+}
+function colEdges(node) {
+  var xs = [node.x];
+  colWidths(node).forEach(function (w) { xs.push(xs[xs.length - 1] + w); });
+  return xs;
 }
 function cellBox(node, r, c) {
-  var t = tableSize(node);
-  return { x: node.x + c * t.cw, y: node.y + r * t.ch, w: t.cw, h: t.ch };
+  var t = tableSize(node), xs = colEdges(node);
+  return { x: xs[c], y: node.y + r * t.ch, w: xs[c + 1] - xs[c], h: t.ch };
 }
 function cellAt(node, point) {
-  var t = tableSize(node);
-  return {
-    r: clamp(Math.floor((point.y - node.y) / t.ch), 0, t.rows - 1),
-    c: clamp(Math.floor((point.x - node.x) / t.cw), 0, t.cols - 1)
-  };
+  var t = tableSize(node), xs = colEdges(node), c = 0;
+  while (c < t.cols - 1 && point.x >= xs[c + 1]) c++;
+  return { r: clamp(Math.floor((point.y - node.y) / t.ch), 0, t.rows - 1), c: c };
+}
+function evenColumns(node) {
+  var ws = colWidths(node);
+  return ws.every(function (w) { return Math.abs(w - ws[0]) < 0.5; });
 }
 function cellField(r, c) { return "cell:" + r + ":" + c; }
 function parseCell(field) {
@@ -1493,8 +1513,9 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
       "stroke-width": strong ? 2 : 1.2, "stroke-opacity": strong ? 0.85 : 0.6
     }, ink)));
   }
+  var xs = colEdges(node);
   for (c = 1; c < t.cols; c++) {
-    var x = node.x + c * t.cw;
+    var x = xs[c];
     shapeGroup.appendChild(makeEl("path", Object.assign({
       d: sidePath({ x: x, y: node.y }, { x: x, y: node.y + node.h }, jitter * 0.5, random),
       "stroke-width": 1.2, "stroke-opacity": 0.6
@@ -1723,6 +1744,25 @@ function drawOverlay() {
     }));
   }
 
+  /* column grips on a selected table: one on every column line, plus the
+     right edge, which widens only the last column */
+  var only = selList();
+  if (!editing && only.length === 1 && only[0].kind === "node" && only[0].item.type === "table" &&
+      (!drag || drag.type === "col")) {
+    var tn = only[0].item, xs = colEdges(tn);
+    for (var ci = 1; ci < xs.length; ci++) {
+      var edgeEnd = ci === xs.length - 1, inset = edgeEnd ? 10 * k : 0;
+      var grip = makeEl("rect", {
+        x: (xs[ci] - 5 * k).toFixed(1), y: (tn.y + inset).toFixed(1),
+        width: (10 * k).toFixed(1), height: Math.max(1, tn.h - inset * 2).toFixed(1),
+        rx: (3 * k).toFixed(1), class: "grab col-grip" + (drag && drag.col === ci - 1 ? " live" : "")
+      });
+      grip.dataset.colNode = tn.id;
+      grip.dataset.colEdge = ci;
+      overlay.appendChild(grip);
+    }
+  }
+
   /* anchor dots: on the hovered shape, or on everything while connecting */
   var anchorNodes = [];
   if (tool === "connect") anchorNodes = nodes();
@@ -1923,11 +1963,13 @@ function addTableRow(node, at) {
   node.h = Math.round(node.h + t.ch);
 }
 function addTableCol(node, at) {
-  var t = tableSize(node);
-  var c = at == null ? t.cols : at;
+  var t = tableSize(node), ws = colWidths(node);
+  var c = at == null ? t.cols : at, fresh = node.w / t.cols;
   node.cells.forEach(function (row) { row.splice(c, 0, ""); });
   node.fills.forEach(function (row) { row.splice(c, 0, null); });
-  node.w = Math.round(node.w + t.cw);
+  ws.splice(c, 0, fresh);
+  node.colW = ws.map(function (w) { return Math.round(w); });
+  node.w = Math.round(node.w + fresh);
 }
 function editTables(change) {
   var list = selNodes().filter(function (n) { return n.type === "table"; });
@@ -1938,10 +1980,13 @@ function editTables(change) {
     if (change === "addCol") addTableCol(n);
     if (change === "dropRow" && t.rows > 1) { n.cells.pop(); n.fills.pop(); n.h = Math.max(MIN_H, Math.round(n.h - t.ch)); }
     if (change === "dropCol" && t.cols > 1) {
+      var ws = colWidths(n), gone = ws.pop();
       n.cells.forEach(function (row) { row.pop(); });
       n.fills.forEach(function (row) { row.pop(); });
-      n.w = Math.max(MIN_W, Math.round(n.w - t.cw));
+      n.colW = ws.map(function (w) { return Math.round(w); });
+      n.w = Math.max(MIN_W, Math.round(n.w - gone));
     }
+    if (change === "evenCols") n.colW = null;
   });
   commit(); render();
 }
@@ -2356,6 +2401,12 @@ stage.addEventListener("pointerdown", function (event) {
     stage.setPointerCapture(event.pointerId);
     return;
   }
+  if (d.colEdge) {
+    var cn = findNode(d.colNode);
+    drag = { type: "col", id: cn.id, col: +d.colEdge - 1, startX: point.x, widths: colWidths(cn), moved: false };
+    stage.setPointerCapture(event.pointerId);
+    return;
+  }
   if (d.resizeCorner) {
     var rn = findNode(d.resizeNode);
     drag = { type: "resize", id: d.resizeNode, corner: d.resizeCorner, box: { x: rn.x, y: rn.y, w: rn.w, h: rn.h } };
@@ -2399,7 +2450,7 @@ stage.addEventListener("pointerdown", function (event) {
         return;
       }
       pickCell(hitNode.id, picked.r, picked.c);
-      setHint("Shift+click another cell to pick a block of cells. Double click to type.");
+      setHint("Drag a column line to resize that column (Shift keeps the table width). Shift+click picks a block of cells.");
     }
     if (event.shiftKey || event.metaKey || event.ctrlKey) selectToggle(hitId);
     else if (!sel.has(hitId)) selectOnly(hitId);
@@ -2470,7 +2521,8 @@ window.addEventListener("pointermove", function (event) {
     var right = box.x + box.w, bottom = box.y + box.h;
     var minW = MIN_W, minH = MIN_H;
     if (node.type === "table") {
-      minW = Math.max(MIN_W, node.cells[0].length * MIN_CELL_W);
+      var ws = colWidths(node);
+      minW = Math.max(MIN_W, Math.ceil(MIN_CELL_W * node.w / Math.min.apply(null, ws)));
       minH = Math.max(MIN_H, node.cells.length * MIN_CELL_H);
     }
     if (drag.corner === "nw" || drag.corner === "sw") {
@@ -2489,6 +2541,30 @@ window.addEventListener("pointermove", function (event) {
       node.h = Math.max(10, Math.round(node.w * node.natH / node.natW));
       if (drag.corner === "nw" || drag.corner === "ne") node.y = bottom - node.h;
     }
+    renderCanvas();
+    return;
+  }
+
+  /* Dragging a column line resizes that column and the table grows with
+     it. With Shift the next column gives up the width instead, so the
+     table keeps its size. */
+  if (drag.type === "col") {
+    var tbl = findNode(drag.id);
+    if (!tbl) return;
+    var ws = drag.widths.slice(), col = drag.col;
+    var left = tbl.x + ws.slice(0, col).reduce(function (a, b) { return a + b; }, 0);
+    var line = left + ws[col] + (point.x - drag.startX);
+    if (snapOn) line = snap(line);
+    var want = Math.max(MIN_CELL_W, line - left);
+    if (event.shiftKey && col < ws.length - 1) {
+      var pair = ws[col] + ws[col + 1];
+      want = clamp(want, MIN_CELL_W, pair - MIN_CELL_W);
+      ws[col + 1] = pair - want;
+    }
+    ws[col] = want;
+    if (Math.abs(point.x - drag.startX) > 2) drag.moved = true;
+    tbl.colW = ws.map(function (w) { return Math.round(w); });
+    tbl.w = tbl.colW.reduce(function (a, b) { return a + b; }, 0);
     renderCanvas();
     return;
   }
@@ -2605,6 +2681,7 @@ function endDrag(event) {
 
   if (d.type === "marquee") { render(); return; }
   if (d.type === "move" && !d.moved) { render(); return; }
+  if (d.type === "col" && !d.moved) { render(); return; }
 
   commit();
   render();
@@ -3126,6 +3203,12 @@ function buildNodeBubble(node) {
         onClick: function () { setCellFill(null); }
       }));
       bubble.appendChild(divider());
+    }
+    if (!evenColumns(node)) {
+      bubble.appendChild(toolButton({
+        label: "Even columns", title: "Make every column the same width",
+        onClick: function () { editTables("evenCols"); }
+      }));
     }
     bubble.appendChild(toolButton({
       label: "Header", title: "Shade the first row", pressed: !!node.header,
