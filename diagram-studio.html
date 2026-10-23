@@ -329,6 +329,15 @@ input[type="color"] {
 .pal-label { font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 5px; }
 .pal-empty { grid-column: 1 / -1; font-size: 11px; color: var(--ink-soft); line-height: 22px; }
 .pal-cell { padding: 0; cursor: pointer; transition: transform .12s ease; }
+.pal-saved { position: relative; display: grid; }
+.pal-del {
+  position: absolute; top: -5px; right: -5px; width: 15px; height: 15px; padding: 0;
+  display: grid; place-items: center; border-radius: 50%; border: 1.5px solid var(--paper);
+  background: var(--ink); color: #fff; font-size: 11px; line-height: 1; cursor: pointer;
+  opacity: 0; transform: scale(.7); transition: opacity .12s ease, transform .12s ease;
+}
+.pal-saved:hover .pal-del, .pal-saved:focus-within .pal-del { opacity: 1; transform: none; }
+.pal-del:hover { background: var(--red); }
 .pal-add { display: grid; place-items: center; background: var(--pill); color: var(--ink-mid); border-style: dashed; }
 .pal-add:disabled { opacity: .4; cursor: default; transform: none; }
 .palette .btn { height: 26px; padding: 0 9px; border: 1px solid var(--hair); font-size: 12px; }
@@ -3057,15 +3066,29 @@ function renderColorPicker(focusHex) {
 
   palette.appendChild(htmlEl("div", "pal-label", "Saved"));
   var saved = htmlEl("div", "pal-grid");
+  /* Each saved colour gets a small x on hover or focus. Right click,
+     Delete and Backspace remove it too. */
+  function forget(hex) {
+    colorBook.saved = colorBook.saved.filter(function (h) { return h !== hex; });
+    saveColorBook();
+    renderColorPicker();
+    toast("Removed " + hex + " from saved colours");
+  }
   colorBook.saved.forEach(function (hex) {
-    var chip = colorChip(hex, hex + "  ·  right click to remove");
-    chip.addEventListener("contextmenu", function (e) {
-      e.preventDefault();
-      colorBook.saved = colorBook.saved.filter(function (h) { return h !== hex; });
-      saveColorBook();
-      renderColorPicker();
+    var slot = htmlEl("span", "pal-saved");
+    var chip = colorChip(hex);
+    chip.addEventListener("contextmenu", function (e) { e.preventDefault(); forget(hex); });
+    chip.addEventListener("keydown", function (e) {
+      if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); e.stopPropagation(); forget(hex); }
     });
-    saved.appendChild(chip);
+    var drop = htmlEl("button", "pal-del", "×");
+    drop.type = "button";
+    drop.dataset.tip = "Remove " + hex;
+    drop.setAttribute("aria-label", "Remove " + hex + " from saved colours");
+    drop.addEventListener("click", function (e) { e.stopPropagation(); forget(hex); });
+    slot.appendChild(chip);
+    slot.appendChild(drop);
+    saved.appendChild(slot);
   });
   var add = htmlEl("button", "pal-cell pal-add");
   add.type = "button";
