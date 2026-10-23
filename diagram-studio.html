@@ -4634,6 +4634,17 @@ function lzwEncode(indices) {
   if (bits > 0) out.push(acc & 255);
   return out;
 }
+/* True when a pixel that was coloured has to become clear, which only
+   happens in a transparent GIF when a step hides something. */
+function erasesPixels(prev, idx) {
+  for (var i = 0; i < idx.length; i++) if (idx[i] === GIF_KEEP && prev[i] !== GIF_KEEP) return true;
+  return false;
+}
+function keepUnchanged(idx, prev) {
+  var out = new Uint8Array(idx.length);
+  for (var i = 0; i < idx.length; i++) out[i] = idx[i] === prev[i] ? GIF_KEEP : idx[i];
+  return out;
+}
 /* Only the box that changed since the last frame is stored, and inside
    it the untouched pixels are written as "keep". */
 function gifFrame(idx, prev, w, h) {
@@ -4666,7 +4677,8 @@ function writeGif(w, h, palette, frames, loop) {
   for (var c = 0; c < 256; c++) { var col = palette[c] || [0, 0, 0]; bytes.push(col[0], col[1], col[2]); }
   if (loop) { bytes.push(0x21, 0xFF, 0x0B); ascii("NETSCAPE2.0"); bytes.push(3, 1); u16(0); bytes.push(0); }
   frames.forEach(function (f) {
-    bytes.push(0x21, 0xF9, 4, (1 << 2) | 1);
+    /* disposal 1 leaves the frame in place; 2 clears it after showing */
+    bytes.push(0x21, 0xF9, 4, ((f.dispose || 1) << 2) | 1);
     u16(Math.max(2, Math.round(f.delay / 10)));
     bytes.push(GIF_KEEP, 0);
     bytes.push(0x2C); u16(f.x); u16(f.y); u16(f.w); u16(f.h); bytes.push(0);
@@ -4752,7 +4764,9 @@ function exportGif(opts, onProgress, onDone, onFail) {
   rasterize(svgFor({ all: true }), w, h, function (finished) {
     var palette = gifPalette(gifHistogram(finished, !opts.background), 255);
     var toIndices = gifMapper(palette, !opts.background);
-    var frames = [], prev = null, i = 0;
+    /* shown: what the last stored frame leaves on screen; before: what was
+       on screen before it, which is what its "keep" pixels point back to */
+    var frames = [], shown = null, before = null, i = 0;
     (function next() {
       if (job.cancelled) return;
       if (i >= plan.frames.length) { onDone(writeGif(w, h, palette, frames, opts.animated)); return; }
@@ -4760,10 +4774,31 @@ function exportGif(opts, onProgress, onDone, onFail) {
       var f = plan.frames[i++];
       rasterize(svgFor(f), w, h, function (px) {
         var idx = toIndices(px);
-        var frame = gifFrame(idx, prev, w, h);
-        if (frame) { frame.delay = f.delay; frames.push(frame); }
-        else if (frames.length) frames[frames.length - 1].delay += f.delay;
-        prev = idx;
+        var frame;
+        if (shown && erasesPixels(shown, idx)) {
+          /* "Keep" can't turn a coloured pixel clear again. So the frame
+             before this one is stored whole and marked to clear the
+             canvas once it has been shown, and this one is drawn whole
+             on that clean canvas. */
+          var last = frames[frames.length - 1];
+          /* a frame drawn on a cleared canvas has nothing under it to keep */
+          var whole = last.onClean ? shown : keepUnchanged(shown, before);
+          last.x = 0; last.y = 0; last.w = w; last.h = h;
+          last.data = lzwEncode(whole);
+          last.dispose = 2;
+          frame = { x: 0, y: 0, w: w, h: h, data: lzwEncode(idx), onClean: true };
+        } else {
+          frame = gifFrame(idx, shown, w, h);
+          if (frame) frame.onClean = !frames.length;
+        }
+        if (frame) {
+          frame.delay = f.delay;
+          frames.push(frame);
+          before = shown;
+          shown = idx;
+        } else if (frames.length) {
+          frames[frames.length - 1].delay += f.delay;
+        }
         setTimeout(next, 0);
       }, onFail);
     })();
