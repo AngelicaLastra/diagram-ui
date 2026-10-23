@@ -2320,7 +2320,7 @@ function setTool(next) {
 }
 var spaceDown = false;
 function updateCursor() {
-  stage.classList.toggle("grabbing", !!(drag && drag.type === "pan"));
+  stage.classList.toggle("grabbing", !!(drag && drag.type === "pan" && (!drag.right || (rightPan && rightPan.moved))));
   stage.classList.toggle("grabby", !drag && (tool === "pan" || spaceDown));
   stage.classList.toggle("crossy", tool === "connect" || !!toolShape(tool));
   stage.classList.toggle("texty", tool === "text");
@@ -2373,7 +2373,16 @@ stage.addEventListener("pointerleave", function () {
 });
 
 stage.addEventListener("pointerdown", function (event) {
-  if (event.button === 2) return;
+  /* The right button pans when dragged and opens the menu when it is
+     just clicked; the contextmenu handler below makes that call. */
+  if (event.button === 2) {
+    closeMenus();
+    stopReveal();
+    rightPan = { target: event.target, x: event.clientX, y: event.clientY, moved: false, menuAsked: false };
+    drag = { type: "pan", right: true, sx: event.clientX, sy: event.clientY, vx: view.x, vy: view.y };
+    stage.setPointerCapture(event.pointerId);
+    return;
+  }
   closeMenus();
   stopReveal();
 
@@ -2485,6 +2494,11 @@ window.addEventListener("pointermove", function (event) {
 
   if (drag.type === "pan") {
     var k = viewScale();
+    if (drag.right && !rightPan.moved) {
+      if (Math.hypot(event.clientX - drag.sx, event.clientY - drag.sy) < 4) return;
+      rightPan.moved = true;
+      updateCursor();
+    }
     view.x = drag.vx - (event.clientX - drag.sx) / k;
     view.y = drag.vy - (event.clientY - drag.sy) / k;
     applyView();
@@ -2643,7 +2657,16 @@ function endDrag(event) {
   guides = []; marquee = null;
   document.body.classList.remove("no-texture");
 
-  if (d.type === "pan") { updateCursor(); return; }
+  if (d.type === "pan") {
+    if (d.right) {
+      var held = rightPan;
+      rightPan = null;
+      if (held.moved) quietMenuUntil = Date.now() + 400;
+      else if (held.menuAsked) openContextFor(held.target, held.x, held.y);
+    }
+    updateCursor();
+    return;
+  }
 
   if (d.type === "place") {
     var at = point || d.start;
@@ -2688,6 +2711,7 @@ function endDrag(event) {
 }
 window.addEventListener("pointerup", endDrag);
 window.addEventListener("pointercancel", function () {
+  rightPan = null;
   if (!drag) return;
   drag = null; guides = []; marquee = null; ghost = null;
   document.body.classList.remove("no-texture");
@@ -2712,15 +2736,24 @@ stage.addEventListener("wheel", function (event) {
 }, { passive: false });
 
 var menuPoint = null;
+/* Mac and Linux send contextmenu as the right button goes down, Windows
+   as it comes up. While the button is held we only note the request and
+   decide on release; right after a pan, a late Windows one is ignored. */
+var rightPan = null, quietMenuUntil = 0;
 stage.addEventListener("contextmenu", function (event) {
   event.preventDefault();
-  menuPoint = toStage(event);
-  var d = event.target.dataset || {};
+  if (rightPan) { rightPan.menuAsked = true; return; }
+  if (Date.now() < quietMenuUntil) return;
+  openContextFor(event.target, event.clientX, event.clientY);
+});
+function openContextFor(target, clientX, clientY) {
+  menuPoint = toStage({ clientX: clientX, clientY: clientY });
+  var d = target.dataset || {};
   var id = d.nodeId || d.edgeId || d.textId;
   if (id && !sel.has(id)) selectOnly(id);
   else if (!id) clearSel();
-  openContextMenu(event.clientX, event.clientY);
-});
+  openContextMenu(clientX, clientY);
+}
 
 /* ================================================================
    17. Typing straight onto the sheet
@@ -4496,7 +4529,7 @@ function showShortcuts() {
      [MOD + " + C  V  X", "Copy, paste, cut"], [MOD + " + D", "Duplicate"],
      [MOD + " + A", "Select everything"], ["Delete", "Remove the selection"],
      ["Arrows", "Nudge by one"], ["Shift + arrows", "Nudge by ten"],
-     ["Space + drag", "Move around the canvas"], ["Scroll", "Move around the canvas"],
+     ["Space + drag", "Move around the canvas"], ["Right drag", "Move around the canvas"], ["Scroll", "Move around the canvas"],
      [MOD + " + scroll", "Zoom at the pointer (or pinch)"],
      ["Shift + drag", "Keep a move on one axis"], ["Alt + place", "Keep the shape tool active"],
      ["Shift + click", "Add to the selection, or stretch a table cell pick"], ["?", "This list"]]
