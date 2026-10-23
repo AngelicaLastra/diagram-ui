@@ -225,6 +225,18 @@ svg { display: block; }
 .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip.dim span { color: var(--ink-soft); font-style: italic; }
 .gap { height: 7px; position: relative; }
+.gap.has-pause { height: auto; padding: 4px 0; display: flex; justify-content: center; align-items: center; }
+.gap.has-pause::before {
+  content: ""; position: absolute; left: 18px; right: 18px; top: 50%;
+  border-top: 1.5px dashed var(--hair);
+}
+.pause-pill {
+  position: relative; display: inline-flex; align-items: center; gap: 5px;
+  height: 22px; padding: 0 9px; border-radius: 11px; cursor: pointer;
+  background: var(--pill); border: 1px solid var(--hair); color: var(--ink-mid);
+  font-size: 11px; font-weight: 500;
+}
+.pause-pill:hover { background: var(--pill-on); color: var(--ink); }
 .gap.over::after { content: ""; position: absolute; left: 4px; right: 4px; top: 2px; height: 3px; border-radius: 2px; background: var(--red); }
 .dragging { opacity: .4; }
 /* the panel clips at its edges, so its tooltips hug the side they start on */
@@ -643,6 +655,7 @@ var ICONS = {
   code: '<path d="M6.4 5.8 L3 9 L6.4 12.2 M11.6 5.8 L15 9 L11.6 12.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
   lock: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="4" y="7.8" width="10" height="7.2" rx="1.6"/><path d="M6.2 7.8V5.8a2.8 2.8 0 0 1 5.6 0v2"/></g>',
   eyeOff: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1.6 9S4.3 4.2 9 4.2c1.5 0 2.8.5 3.9 1.1M16.4 9s-1 1.8-2.8 3.2M10.6 13.6c-.5.1-1 .2-1.6.2C4.3 13.8 1.6 9 1.6 9"/><path d="M3 15 L15 3"/></g>',
+  pause: '<g fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="9" cy="9" r="6.3"/><path d="M7.4 6.6 V11.4 M10.6 6.6 V11.4" stroke-linecap="round"/></g>',
   more: '<g fill="currentColor"><circle cx="4.5" cy="9" r="1.4"/><circle cx="9" cy="9" r="1.4"/><circle cx="13.5" cy="9" r="1.4"/></g>',
   close: '<path d="M5 5 L13 13 M13 5 L5 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   eye: '<g fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.6 9S4.3 4.2 9 4.2 16.4 9 16.4 9 13.7 13.8 9 13.8 1.6 9 1.6 9z"/><circle cx="9" cy="9" r="2.3"/></g>',
@@ -4008,7 +4021,7 @@ var revealTimers = [];
 function revealSteps() {
   var auto = revealOrder();
   var custom = page().reveal;
-  if (!custom) return { start: [], steps: auto.map(function (k) { return [{ id: k, hide: false }]; }), custom: false };
+  if (!custom) return { start: [], steps: auto.map(function (k) { return [{ id: k, hide: false }]; }), pauses: auto.map(function () { return 0; }), custom: false };
   /* Steps hold entries: a plain id appears, { id, hide: true } disappears.
      Each item appears once and hides at most once, and only after it has
      appeared; anything that breaks that is dropped rather than played. */
@@ -4018,10 +4031,13 @@ function revealSteps() {
     seen.add(k); shownAt[k] = -1;
     return true;
   });
-  var steps = [];
+  /* A stored step is a list of entries, or { pause, items } when it
+     waits a number of seconds before it happens. */
+  var steps = [], pauses = [];
   custom.steps.forEach(function (raw) {
     var index = steps.length, kept = [];
-    (raw || []).forEach(function (e) {
+    var items = Array.isArray(raw) ? raw : (raw && raw.items) || [];
+    items.forEach(function (e) {
       var entry = typeof e === "string" ? { id: e, hide: false } : { id: e && e.id, hide: !!(e && e.hide) };
       var key = entryKey(entry);
       if (!live.has(entry.id) || seen.has(key)) return;
@@ -4030,17 +4046,18 @@ function revealSteps() {
       if (!entry.hide) shownAt[entry.id] = index;
       kept.push(entry);
     });
-    if (kept.length) steps.push(kept);
+    if (kept.length) { steps.push(kept); pauses.push(Array.isArray(raw) ? 0 : clamp(+raw.pause || 0, 0, 60)); }
   });
-  auto.forEach(function (k) { if (!seen.has(k)) steps.push([{ id: k, hide: false }]); });
-  return { start: start, steps: steps, custom: true };
+  auto.forEach(function (k) { if (!seen.has(k)) { steps.push([{ id: k, hide: false }]); pauses.push(0); } });
+  return { start: start, steps: steps, pauses: pauses, custom: true };
 }
 function entryKey(e) { return e.hide ? e.id + "#hide" : e.id; }
 function stepIds(st) { return st.map(function (e) { return e.id; }); }
 
 /* Stores a reveal after checking that every hide comes in a later step
    than its item's appearance. Returns false (and says why) if not. */
-function saveReveal(start, steps) {
+function saveReveal(start, steps, pauses) {
+  pauses = (pauses || []).filter(function (p, i) { return steps[i] && steps[i].length; });
   steps = steps.filter(function (st) { return st.length; });
   var shownAt = {};
   start.forEach(function (k) { shownAt[k] = -1; });
@@ -4057,7 +4074,10 @@ function saveReveal(start, steps) {
   }
   page().reveal = {
     start: start.slice(),
-    steps: steps.map(function (st) { return st.map(function (e) { return e.hide ? { id: e.id, hide: true } : e.id; }); })
+    steps: steps.map(function (st, i) {
+      var items = st.map(function (e) { return e.hide ? { id: e.id, hide: true } : e.id; });
+      return pauses[i] ? { pause: pauses[i], items: items } : items;
+    })
   };
   commit(); render();
   return true;
@@ -4131,7 +4151,9 @@ function playReveal() {
   hitsGroup.style.display = "none";
   setHint("Playing. Press Play again or click the sheet to stop.");
 
+  var at = 0;
   plan.steps.forEach(function (st, index) {
+    at += (index ? step : 0) + plan.pauses[index] * 1000;
     revealTimers.push(setTimeout(function () {
       st.forEach(function (e) { setKeyOpacity(e.id, e.hide ? "0" : "1"); });
       markPlayingStep(index);
@@ -4143,7 +4165,7 @@ function playReveal() {
         revealHolding = anyHides;
         setHint(anyHides ? "Reveal finished. Click the sheet to bring back what was hidden." : "Reveal finished.");
       }
-    }, index * step));
+    }, at));
   });
   setPlayButton();
 }
@@ -4195,22 +4217,25 @@ function moveReveal(entries, target) {
   }
   var start = r.start.filter(function (k) { return !gone.has(k); });
   var steps = r.steps.map(function (st) { return st.filter(function (e) { return !gone.has(entryKey(e)); }); });
+  var pauses = r.pauses.slice();
   if (target.kind === "start") start = start.concat(entries.map(function (e) { return e.id; }));
   else if (target.kind === "step") steps[target.index] = steps[target.index].concat(entries);
-  else steps.splice(target.index, 0, entries.slice());
-  saveReveal(start, steps);
+  else { steps.splice(target.index, 0, entries.slice()); pauses.splice(target.index, 0, 0); }
+  saveReveal(start, steps, pauses);
 }
 function moveStep(index, by) {
   var r = revealSteps(), to = index + by;
   if (to < 0 || to >= r.steps.length) return;
-  var moving = r.steps.splice(index, 1)[0];
+  var moving = r.steps.splice(index, 1)[0], wait = r.pauses.splice(index, 1)[0];
   r.steps.splice(to, 0, moving);
-  saveReveal(r.start, r.steps);
+  r.pauses.splice(to, 0, wait);
+  saveReveal(r.start, r.steps, r.pauses);
 }
 function splitStep(index) {
   var r = revealSteps(), parts = r.steps[index].map(function (e) { return [e]; });
   r.steps.splice.apply(r.steps, [index, 1].concat(parts));
-  saveReveal(r.start, r.steps);
+  r.pauses.splice.apply(r.pauses, [index + 1, 0].concat(parts.slice(1).map(function () { return 0; })));
+  saveReveal(r.start, r.steps, r.pauses);
 }
 /* A hide goes in its own step right after the item appears (or at the
    very end), ready to be dragged in with whatever it should go with. */
@@ -4223,12 +4248,53 @@ function addHide(id, atEnd) {
   var shown = -1;
   r.steps.forEach(function (st, i) { if (st.some(function (e) { return e.id === id && !e.hide; })) shown = i; });
   if (shown < 0 && r.start.indexOf(id) < 0) return;
-  r.steps.splice(atEnd ? r.steps.length : shown + 1, 0, [{ id: id, hide: true }]);
-  if (saveReveal(r.start, r.steps)) toast("Added a step that hides it. Drag it to the moment it should go.");
+  var at = atEnd ? r.steps.length : shown + 1;
+  r.steps.splice(at, 0, [{ id: id, hide: true }]);
+  r.pauses.splice(at, 0, 0);
+  if (saveReveal(r.start, r.steps, r.pauses)) toast("Added a step that hides it. Drag it to the moment it should go.");
 }
 function removeHide(id) {
   var r = revealSteps();
-  saveReveal(r.start, r.steps.map(function (st) { return st.filter(function (e) { return !(e.id === id && e.hide); }); }));
+  saveReveal(r.start, r.steps.map(function (st) { return st.filter(function (e) { return !(e.id === id && e.hide); }); }), r.pauses);
+}
+/* A pause is extra time, in seconds, waited before a step happens, on top
+   of the usual spacing set by the speed menu. */
+function setPause(index, seconds) {
+  var r = revealSteps();
+  r.pauses[index] = clamp(Math.round((+seconds || 0) * 10) / 10, 0, 60);
+  saveReveal(r.start, r.steps, r.pauses);
+}
+function formatPause(seconds) { return (Math.round(seconds * 10) / 10) + "s"; }
+function pauseMenu(index, current, x, y) {
+  var items = [{ header: "Pause before step " + (index + 1) }];
+  [0.5, 1, 2, 3, 5].forEach(function (v) {
+    items.push({ label: formatPause(v), checked: current === v ? true : null, run: function () { setPause(index, v); } });
+  });
+  items.push({ label: "Other amount…", run: function () { askPause(index, current); } });
+  if (current) items.push("-", { label: "Remove the pause", icon: "trash", danger: true, run: function () { setPause(index, 0); } });
+  openMenuAt(x, y, items);
+}
+function askPause(index, current) {
+  openModal(function (m) {
+    m.appendChild(htmlEl("h2", null, "Pause before step " + (index + 1)));
+    m.appendChild(htmlEl("p", "sub", "Extra time to wait, on top of the usual spacing between steps."));
+    var row = htmlEl("div");
+    row.style.cssText = "display:flex;gap:8px;align-items:center";
+    var input = numberControl(current || 2, 0, 60, "Seconds", function () {}, 0.1);
+    input.style.width = "90px";
+    row.appendChild(input);
+    row.appendChild(htmlEl("span", null, "seconds"));
+    m.appendChild(row);
+    function apply() { closeModal(); setPause(index, parseFloat(input.value)); }
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); apply(); } });
+    var foot = htmlEl("div", "modal-foot");
+    foot.appendChild(toolButton({ label: "Cancel", onClick: closeModal }));
+    var ok = toolButton({ label: "Set pause", onClick: apply });
+    ok.classList.add("accent");
+    foot.appendChild(ok);
+    m.appendChild(foot);
+    window.requestAnimationFrame(function () { input.focus(); input.select(); });
+  });
 }
 
 function orderChip(entry, hasHide) {
@@ -4302,6 +4368,21 @@ function renderOrderPanel() {
   r.steps.forEach(function (entries, index) {
     var ids = stepIds(entries);
     var gap = htmlEl("div", "gap");
+    var wait = r.pauses[index];
+    if (wait) {
+      gap.classList.add("has-pause");
+      var pill = htmlEl("button", "pause-pill");
+      pill.type = "button";
+      pill.appendChild(icon("pause", 12));
+      pill.appendChild(htmlEl("span", null, formatPause(wait) + " pause"));
+      pill.dataset.tip = "Change or remove this pause";
+      pill.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var rc = pill.getBoundingClientRect();
+        pauseMenu(index, wait, rc.left, rc.bottom + 4);
+      });
+      gap.appendChild(pill);
+    }
     dropTarget(gap, { kind: "gap", index: index });
     orderBody.appendChild(gap);
 
@@ -4323,7 +4404,10 @@ function renderOrderPanel() {
       openMenuAt(x, y, [
         { label: "Move earlier", icon: "up", disabled: index === 0, run: function () { moveStep(index, -1); } },
         { label: "Move later", icon: "down", disabled: index === r.steps.length - 1, run: function () { moveStep(index, 1); } },
-        { label: "Split into separate steps", icon: "distV", disabled: entries.length < 2, run: function () { splitStep(index); } }
+        { label: "Split into separate steps", icon: "distV", disabled: entries.length < 2, run: function () { splitStep(index); } },
+        "-",
+        { label: r.pauses[index] ? "Change the pause before it…" : "Pause before this step…", icon: "pause",
+          run: function () { pauseMenu(index, r.pauses[index], x, y); } }
       ]);
     }
     var tools = htmlEl("div", "step-tools");
@@ -4619,11 +4703,13 @@ function rasterize(svg, w, h, done, fail) {
    the same 200ms fade (skipped when transparent, since GIF has no soft
    edges). The last frame holds so the finished sheet can be read. */
 function gifPlan(opts) {
-  var steps = revealSteps().steps;
+  var plan = revealSteps(), steps = plan.steps;
   if (!opts.animated || !steps.length) return { steps: steps, frames: [{ all: true, delay: 0 }] };
   var step = parseInt($("speed").value, 10) || 700;
   var frames = [{ visible: 0, partial: 0, delay: 500 }];
   steps.forEach(function (st, i) {
+    /* a pause stretches whatever frame is on screen before this step */
+    frames[frames.length - 1].delay += plan.pauses[i] * 1000;
     if (opts.background) {
       frames.push({ visible: i, partial: 1 / 3, delay: 70 }, { visible: i, partial: 2 / 3, delay: 70 });
       frames.push({ visible: i + 1, partial: 0, delay: Math.max(60, step - 140) });
