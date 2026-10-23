@@ -610,6 +610,8 @@ var ICONS = {
   pill: '<rect x="2.2" y="5.4" width="13.6" height="7.2" rx="3.6" fill="none" stroke="currentColor" stroke-width="1.5"/>',
   note: '<path d="M3.4 3.6 h9.2 l3 3 v7.8 h-12.2 z M12.6 3.6 v3 h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>',
   table: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="13" height="11" rx="1.5"/><path d="M2.5 7.2 H15.5 M2.5 10.9 H15.5 M7 3.5 V14.5 M11.2 3.5 V14.5" stroke-width="1.1"/></g>',
+  merge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M5.5 9 H12.5 M10.5 7 L12.5 9 L10.5 11 M7.5 7 L5.5 9 L7.5 11"/></g>',
+  unmerge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M9 4 V14" stroke-dasharray="1.6 1.8"/><path d="M7 9 H4.5 M5.8 7.6 L4.4 9 L5.8 10.4 M11 9 H13.5 M12.2 7.6 L13.6 9 L12.2 10.4"/></g>',
   rowAdd: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="3" width="13" height="6" rx="1.2"/><path d="M9 11.2 V16 M6.6 13.6 H11.4"/></g>',
   rowDel: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="3" width="13" height="6" rx="1.2"/><path d="M6.6 13.6 H11.4"/></g>',
   colAdd: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="2.5" width="6" height="13" rx="1.2"/><path d="M11.2 9 H16 M13.6 6.6 V11.4"/></g>',
@@ -1140,14 +1142,52 @@ function colEdges(node) {
   colWidths(node).forEach(function (w) { xs.push(xs[xs.length - 1] + w); });
   return xs;
 }
-function cellBox(node, r, c) {
+/* Merged cells are regions { r, c, rs, cs }: the top-left cell holds the
+   text and colour for the whole region, and the cells it covers are
+   skipped. Regions never overlap. */
+function tableMerges(node) { return Array.isArray(node.merges) ? node.merges : []; }
+function mergeAt(node, r, c) {
+  return tableMerges(node).filter(function (m) {
+    return r >= m.r && r < m.r + m.rs && c >= m.c && c < m.c + m.cs;
+  })[0] || null;
+}
+function isCovered(node, r, c) {
+  var m = mergeAt(node, r, c);
+  return !!m && (m.r !== r || m.c !== c);
+}
+/* Keeps regions inside the table after rows or columns go, and drops
+   any that are down to a single cell or overlap one kept earlier. */
+function trimMerges(node) {
+  var rows = node.cells.length, cols = node.cells[0].length, taken = {};
+  node.merges = tableMerges(node).map(function (m) {
+    var r = Math.max(0, m.r | 0), c = Math.max(0, m.c | 0);
+    return { r: r, c: c, rs: Math.min(m.rs | 0, rows - r), cs: Math.min(m.cs | 0, cols - c) };
+  }).filter(function (m) {
+    if (m.r >= rows || m.c >= cols || m.rs < 1 || m.cs < 1 || m.rs * m.cs < 2) return false;
+    for (var r = m.r; r < m.r + m.rs; r++) for (var c = m.c; c < m.c + m.cs; c++) if (taken[r + ":" + c]) return false;
+    for (r = m.r; r < m.r + m.rs; r++) for (c = m.c; c < m.c + m.cs; c++) taken[r + ":" + c] = 1;
+    return true;
+  });
+  if (!node.merges.length) delete node.merges;
+}
+function rawCellBox(node, r, c) {
   var t = tableSize(node), xs = colEdges(node);
   return { x: xs[c], y: node.y + r * t.ch, w: xs[c + 1] - xs[c], h: t.ch };
 }
+/* The box a cell shows in: its own, or the whole region it is merged into. */
+function cellBox(node, r, c) {
+  var m = mergeAt(node, r, c);
+  if (!m) return rawCellBox(node, r, c);
+  var a = rawCellBox(node, m.r, m.c), b = rawCellBox(node, m.r + m.rs - 1, m.c + m.cs - 1);
+  return { x: a.x, y: a.y, w: b.x + b.w - a.x, h: b.y + b.h - a.y };
+}
+/* The cell under a point; inside a merged region that is its top-left. */
 function cellAt(node, point) {
   var t = tableSize(node), xs = colEdges(node), c = 0;
   while (c < t.cols - 1 && point.x >= xs[c + 1]) c++;
-  return { r: clamp(Math.floor((point.y - node.y) / t.ch), 0, t.rows - 1), c: c };
+  var r = clamp(Math.floor((point.y - node.y) / t.ch), 0, t.rows - 1);
+  var m = mergeAt(node, r, c);
+  return m ? { r: m.r, c: m.c } : { r: r, c: c };
 }
 function evenColumns(node) {
   var ws = colWidths(node);
@@ -1660,7 +1700,7 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
   var r, c;
 
   if (node.header && t.rows > 1) {
-    var band = cellBox(node, 0, 0);
+    var band = rawCellBox(node, 0, 0);
     band.w = node.w;
     shapeGroup.appendChild(makeEl("path", {
       d: wobblyPath(cornersFor(band), jitter * 0.6, random),
@@ -1670,7 +1710,7 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
   for (r = 0; r < t.rows; r++) {
     for (c = 0; c < t.cols; c++) {
       var fill = node.fills[r][c];
-      if (!fill) continue;
+      if (!fill || isCovered(node, r, c)) continue;
       var lit = cellBox(node, r, c);
       shapeGroup.appendChild(makeEl("path", {
         d: wobblyPath(cornersFor({ x: lit.x + 1.5, y: lit.y + 1.5, w: lit.w - 3, h: lit.h - 3 }), jitter * 0.5, random),
@@ -1684,27 +1724,43 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
       "stroke-width": 1.4, "stroke-opacity": 0.55
     }, ink)));
   }
+  /* A rule is drawn in runs, stopping where a merged region spans it, so
+     each run still overshoots its ends like a line ruled by hand. */
+  var xs = colEdges(node);
+  function spans(m, r0, r1, c0, c1) { return m.r <= r0 && m.r + m.rs > r1 && m.c <= c0 && m.c + m.cs > c1; }
+  function blocked(a0, a1, b0, b1) { return tableMerges(node).some(function (m) { return spans(m, a0, a1, b0, b1); }); }
+  function runs(count, open) {
+    var out = [], start = -1;
+    for (var i = 0; i <= count; i++) {
+      if (i < count && open(i)) { if (start < 0) start = i; }
+      else if (start >= 0) { out.push([start, i - 1]); start = -1; }
+    }
+    return out;
+  }
   for (r = 1; r < t.rows; r++) {
     var y = node.y + r * t.ch;
     var strong = node.header && r === 1;
-    shapeGroup.appendChild(makeEl("path", Object.assign({
-      d: sidePath({ x: node.x, y: y }, { x: node.x + node.w, y: y }, jitter * 0.5, random),
-      "stroke-width": strong ? 2 : 1.2, "stroke-opacity": strong ? 0.85 : 0.6
-    }, ink)));
+    runs(t.cols, function (col) { return !blocked(r - 1, r, col, col); }).forEach(function (run) {
+      shapeGroup.appendChild(makeEl("path", Object.assign({
+        d: sidePath({ x: xs[run[0]], y: y }, { x: xs[run[1] + 1], y: y }, jitter * 0.5, random),
+        "stroke-width": strong ? 2 : 1.2, "stroke-opacity": strong ? 0.85 : 0.6
+      }, ink)));
+    });
   }
-  var xs = colEdges(node);
   for (c = 1; c < t.cols; c++) {
     var x = xs[c];
-    shapeGroup.appendChild(makeEl("path", Object.assign({
-      d: sidePath({ x: x, y: node.y }, { x: x, y: node.y + node.h }, jitter * 0.5, random),
-      "stroke-width": 1.2, "stroke-opacity": 0.6
-    }, ink)));
+    runs(t.rows, function (row) { return !blocked(row, row, c - 1, c); }).forEach(function (run) {
+      shapeGroup.appendChild(makeEl("path", Object.assign({
+        d: sidePath({ x: x, y: node.y + run[0] * t.ch }, { x: x, y: node.y + (run[1] + 1) * t.ch }, jitter * 0.5, random),
+        "stroke-width": 1.2, "stroke-opacity": 0.6
+      }, ink)));
+    });
   }
 
   for (r = 0; r < t.rows; r++) {
     for (c = 0; c < t.cols; c++) {
       var text = node.cells[r][c];
-      if (!text) continue;
+      if (!text || isCovered(node, r, c)) continue;
       var box = cellBox(node, r, c);
       var cellFormat = Object.assign({}, format);
       if (node.header && r === 0 && t.rows > 1) cellFormat.weight = 600;
@@ -1849,11 +1905,64 @@ function currentCell() {
   if (!activeCell || list.length !== 1 || list[0].item.id !== activeCell.id) return null;
   var node = list[0].item, t = tableSize(node), a = activeCell;
   if (Math.max(a.r, a.r2) >= t.rows || Math.max(a.c, a.c2) >= t.cols) return null;
-  return {
+  var cur = {
     node: node,
     r0: Math.min(a.r, a.r2), r1: Math.max(a.r, a.r2),
     c0: Math.min(a.c, a.c2), c1: Math.max(a.c, a.c2)
   };
+  /* a pick that cuts into a merged region grows to take all of it */
+  for (var grew = true; grew;) {
+    grew = false;
+    tableMerges(node).forEach(function (m) {
+      var meets = m.r <= cur.r1 && m.r + m.rs - 1 >= cur.r0 && m.c <= cur.c1 && m.c + m.cs - 1 >= cur.c0;
+      if (!meets) return;
+      var r0 = Math.min(cur.r0, m.r), r1 = Math.max(cur.r1, m.r + m.rs - 1);
+      var c0 = Math.min(cur.c0, m.c), c1 = Math.max(cur.c1, m.c + m.cs - 1);
+      if (r0 !== cur.r0 || r1 !== cur.r1 || c0 !== cur.c0 || c1 !== cur.c1) {
+        cur.r0 = r0; cur.r1 = r1; cur.c0 = c0; cur.c1 = c1; grew = true;
+      }
+    });
+  }
+  return cur;
+}
+function pickedMerges(cur) {
+  return tableMerges(cur.node).filter(function (m) {
+    return m.r >= cur.r0 && m.r + m.rs - 1 <= cur.r1 && m.c >= cur.c0 && m.c + m.cs - 1 <= cur.c1;
+  });
+}
+function pickIsOneRegion(cur) {
+  var ms = pickedMerges(cur);
+  return ms.length === 1 && ms[0].r === cur.r0 && ms[0].c === cur.c0 &&
+         ms[0].rs === cur.r1 - cur.r0 + 1 && ms[0].cs === cur.c1 - cur.c0 + 1;
+}
+/* Merging keeps every bit of text, joined in reading order into the
+   top-left cell, and the first colour found. */
+function mergePicked() {
+  var cur = currentCell();
+  if (!cur || (cur.r0 === cur.r1 && cur.c0 === cur.c1) || pickIsOneRegion(cur)) return;
+  var n = cur.node, words = [], colour = null, inside = new Set(pickedMerges(cur));
+  eachPickedCell(cur, function (r, c) {
+    if (isCovered(n, r, c)) return;
+    if (n.cells[r][c]) words.push(n.cells[r][c]);
+    if (!colour && n.fills[r][c]) colour = n.fills[r][c];
+  });
+  eachPickedCell(cur, function (r, c) { n.cells[r][c] = ""; });
+  n.cells[cur.r0][cur.c0] = words.join(" ");
+  if (colour) n.fills[cur.r0][cur.c0] = colour;
+  n.merges = tableMerges(n).filter(function (m) { return !inside.has(m); })
+    .concat([{ r: cur.r0, c: cur.c0, rs: cur.r1 - cur.r0 + 1, cs: cur.c1 - cur.c0 + 1 }]);
+  pickCell(n.id, cur.r0, cur.c0);
+  commit(); render();
+  if (words.length > 1) toast("Merged, and joined the text from " + words.length + " cells");
+}
+function unmergePicked() {
+  var cur = currentCell();
+  if (!cur) return;
+  var gone = new Set(pickedMerges(cur));
+  if (!gone.size) return;
+  cur.node.merges = tableMerges(cur.node).filter(function (m) { return !gone.has(m); });
+  trimMerges(cur.node);
+  commit(); render();
 }
 function eachPickedCell(cur, visit) {
   for (var r = cur.r0; r <= cur.r1; r++) for (var c = cur.c0; c <= cur.c1; c++) visit(r, c);
@@ -2181,6 +2290,7 @@ function editTables(change) {
       n.w = Math.max(MIN_W, Math.round(n.w - gone));
     }
     if (change === "evenCols") n.colW = null;
+    trimMerges(n);
   });
   commit(); render();
 }
@@ -2781,7 +2891,7 @@ stage.addEventListener("pointerdown", function (event) {
         return;
       }
       pickCell(hitNode.id, picked.r, picked.c);
-      setHint("Drag a column line to resize that column (Shift keeps the table width). Shift+click picks a block of cells.");
+      setHint("Drag a column line to resize that column (Shift keeps the table width). Shift+click picks a block of cells to colour or merge.");
     }
     if (event.shiftKey || event.metaKey || event.ctrlKey) selectToggle(hitId);
     else if (!sel.has(hitId)) selectOnly(hitId);
@@ -3279,7 +3389,9 @@ inlineInput.addEventListener("blur", function () { if (editing) closeEditor(); }
 function moveCell(step) {
   var id = editing.id, cell = parseCell(editing.field);
   var node = findNode(id), t = tableSize(node);
-  var index = cell.r * t.cols + cell.c + step;
+  var index = cell.r * t.cols + cell.c;
+  do { index += step; }
+  while (index >= 0 && index < t.rows * t.cols && isCovered(node, Math.floor(index / t.cols), index % t.cols));
   if (index < 0) return;
   closeEditor();
   node = findNode(id);
@@ -3637,9 +3749,9 @@ function buildNodeBubble(node) {
       var shades = [];
       eachPickedCell(cur, function (r, c) { shades.push(cur.node.fills[r][c]); });
       var now = shades.every(function (f) { return f === shades[0]; }) ? shades[0] : null;
-      var many = shades.length > 1;
+      var many = shades.length > 1, oneRegion = pickIsOneRegion(cur);
       bubble.appendChild(divider());
-      bubble.appendChild(htmlEl("span", null, many ? shades.length + " cells" : "Cell"));
+      bubble.appendChild(htmlEl("span", null, oneRegion ? "Merged cell" : many ? shades.length + " cells" : "Cell"));
       bubble.appendChild(paletteRow(now, function (preset) { setCellFill(preset.fill); }));
       bubble.appendChild(colorControl(now || node.fill, many ? "Any colour for these cells" : "Any colour for this cell", setCellFill));
       bubble.appendChild(toolButton({
@@ -3647,6 +3759,12 @@ function buildNodeBubble(node) {
         disabled: !shades.some(Boolean),
         onClick: function () { setCellFill(null); }
       }));
+      if (many && !oneRegion) {
+        bubble.appendChild(toolButton({ icon: "merge", label: "Merge", title: "Merge these cells into one", onClick: mergePicked }));
+      }
+      if (pickedMerges(cur).length) {
+        bubble.appendChild(toolButton({ icon: "unmerge", label: "Unmerge", title: "Split merged cells back apart", onClick: unmergePicked }));
+      }
       bubble.appendChild(divider());
     }
     if (!evenColumns(node)) {
@@ -5134,7 +5252,7 @@ function upgradeNode(n) {
   if (o.type === "table" && !(Array.isArray(o.cells) && o.cells.length && o.cells[0].length)) {
     o.cells = blankCells(3, 3);
   }
-  if (o.type === "table") syncFills(o);
+  if (o.type === "table") { syncFills(o); trimMerges(o); }
   return o;
 }
 function upgradeEdge(e) {
