@@ -493,7 +493,7 @@ input[type="color"] {
           </defs>
           <rect id="bg" x="0" y="0" width="900" height="660" fill="#FFFFFF"/>
           <rect id="gridRect" x="0" y="0" width="900" height="660" fill="url(#grid)"/>
-          <g id="shapes"></g>
+          <g id="shapes" font-family="Poppins, system-ui, sans-serif"></g>
           <g id="labels" font-family="Poppins, system-ui, sans-serif"></g>
           <g id="hits"></g>
           <g id="overlay"></g>
@@ -1312,17 +1312,22 @@ function keyedHit(key, tag, dataAttr) {
   }
   return el;
 }
-function syncLayer(parent, cache, order) {
+function syncChildren(parent, els) {
   var idx = 0;
-  order.forEach(function (key) {
-    var el = cache.get(key);
+  els.forEach(function (el) {
     if (!el) return;
     if (parent.childNodes[idx] !== el) parent.insertBefore(el, parent.childNodes[idx] || null);
     idx++;
   });
   while (parent.childNodes.length > idx) parent.removeChild(parent.lastChild);
+}
+function pruneCache(cache, order) {
   var live = new Set(order);
   Array.from(cache.keys()).forEach(function (k) { if (!live.has(k)) cache.delete(k); });
+}
+function syncLayer(parent, cache, order) {
+  syncChildren(parent, order.map(function (key) { return cache.get(key); }));
+  pruneCache(cache, order);
 }
 
 function drawSketchBody(node, shapeGroup, corners, jitter, random) {
@@ -1648,8 +1653,17 @@ function renderCanvas() {
   nodes().forEach(function (n) { drawNode(n); order.push(n.id); });
   texts().forEach(function (t) { drawFreeText(t); order.push(t.id); });
 
-  syncLayer(shapesLayer, keyCache.shapes, order);
-  syncLayer(labelsLayer, keyCache.labels, order);
+  /* A shape's words sit right on top of its own body, so bringing a
+     picture forward covers the text of whatever is behind it. Arrow
+     labels and free text stay on the top layer above every shape. */
+  var bottom = [], top = [];
+  edges().forEach(function (e) { bottom.push(keyCache.shapes.get(e.id)); top.push(keyCache.labels.get(e.id)); });
+  nodes().forEach(function (n) { bottom.push(keyCache.shapes.get(n.id), keyCache.labels.get(n.id)); });
+  texts().forEach(function (t) { top.push(keyCache.labels.get(t.id)); });
+  syncChildren(shapesLayer, bottom);
+  syncChildren(labelsLayer, top);
+  pruneCache(keyCache.shapes, order);
+  pruneCache(keyCache.labels, order);
   syncLayer(hitsGroup, keyCache.hits, order);
 
   document.body.classList.toggle("no-texture", !textureOn);
