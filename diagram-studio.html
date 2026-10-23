@@ -329,6 +329,13 @@ input[type="color"] {
   border: 1px solid var(--hair); font-family: inherit; font-size: 10.5px; color: var(--ink);
 }
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.gif-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.gif-label { width: 82px; flex: 0 0 auto; font-size: 12.5px; color: var(--ink-mid); }
+.gif-seg { display: flex; gap: 2px; padding: 2px; background: var(--pill); border-radius: 8px; }
+.gif-seg .btn { height: 28px; padding: 0 11px; font-size: 12.5px; }
+.gif-seg .btn[aria-pressed="true"] { background: var(--paper); border-color: var(--hair); box-shadow: 0 1px 2px rgba(35, 35, 31, .08); }
+.gif-note { margin: 6px 0 0; font-size: 12px; line-height: 1.55; color: var(--ink-soft); }
+.gif-status:empty { display: none; }
 
 /* toast */
 .toast {
@@ -3398,6 +3405,7 @@ function fileMenu() {
     { label: "PNG  ·  2×", icon: "image", run: function () { exportPng(2); } },
     { label: "PNG  ·  3×", icon: "image", run: function () { exportPng(3); } },
     { label: "SVG", icon: "code", run: exportSvg },
+    { label: "GIF…", icon: "play", run: showGifExport },
     { label: "Standalone web page", icon: "code", run: exportHtml },
     "-",
     { label: "Load the sample", icon: "eye", run: function () { loadSample(); toast("Sample loaded"); } },
@@ -3612,13 +3620,18 @@ function playReveal() {
 /* ================================================================
    24. Export and files
    ================================================================ */
-function buildSvgString(withSize) {
+/* opts.transparent drops the paper and grid; opts.opacityOf(key) lets the
+   GIF export draw any moment of the reveal. */
+function buildSvgString(withSize, opts) {
+  opts = opts || {};
   var copy = stage.cloneNode(true);
-  ["overlay", "hits"].forEach(function (id) {
+  ["overlay", "hits"].concat(opts.transparent ? ["bg", "gridRect"] : []).forEach(function (id) {
     var g = copy.querySelector("#" + id);
     if (g) g.parentNode.removeChild(g);
   });
-  Array.prototype.forEach.call(copy.querySelectorAll("[data-key]"), function (g) { g.style.opacity = ""; });
+  Array.prototype.forEach.call(copy.querySelectorAll("[data-key]"), function (g) {
+    g.style.opacity = opts.opacityOf ? String(opts.opacityOf(g.getAttribute("data-key"))) : "";
+  });
   if (!textureOn) {
     Array.prototype.forEach.call(copy.querySelectorAll("#shapes g[data-key]"), function (g) { g.removeAttribute("filter"); });
   }
@@ -3659,6 +3672,288 @@ function exportPng(scale) {
   image.onerror = function () { URL.revokeObjectURL(url); toast("This browser could not make the PNG. Try SVG."); };
   image.src = url;
 }
+/* ================================================================
+   24b. GIF export
+        A small GIF89a encoder: one shared palette (built from the
+        finished sheet), LZW, and frames that only store what changed.
+        Index 255 is kept free to mean "clear" in transparent GIFs and
+        "same as before" in every frame after the first.
+   ================================================================ */
+var GIF_KEEP = 255;
+var GIF_ALPHA_CUT = 100;   /* below this a pixel counts as empty in a transparent GIF */
+var gifOptions = { animated: true, background: true, scale: 1 };
+var gifJob = null;
+
+function colorKey(r, g, b) { return ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3); }
+
+function gifHistogram(px, transparent) {
+  var hist = new Uint32Array(32768);
+  for (var i = 0; i < px.length; i += 4) {
+    if (transparent && px[i + 3] < GIF_ALPHA_CUT) continue;
+    hist[colorKey(px[i], px[i + 1], px[i + 2])] += 4;
+    /* the half-faded version of each colour, for the fade frames */
+    if (!transparent) hist[colorKey((px[i] + 255) >> 1, (px[i + 1] + 255) >> 1, (px[i + 2] + 255) >> 1)] += 1;
+  }
+  return hist;
+}
+/* Diagrams are big flat areas, so colours are taken by how much of the
+   sheet they cover, skipping any that sit too close to one already
+   taken. The gap shrinks each pass until the palette is full, which still
+   leaves room for the in-between shades of photos and fades. */
+function gifPalette(hist, maxColors) {
+  var candidates = [];
+  for (var k = 0; k < 32768; k++) {
+    if (!hist[k]) continue;
+    var r = (k >> 10) & 31, g = (k >> 5) & 31, b = k & 31;
+    candidates.push({ c: [(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2)], n: hist[k] });
+  }
+  if (!candidates.length) return [[255, 255, 255]];
+  candidates.sort(function (a, b) { return b.n - a.n; });
+  var palette = [], taken = new Uint8Array(candidates.length);
+  [48, 28, 16, 8, 0].forEach(function (gap) {
+    var limit = gap * gap;
+    for (var i = 0; i < candidates.length && palette.length < maxColors; i++) {
+      if (taken[i]) continue;
+      var c = candidates[i].c, near = false;
+      for (var p = 0; p < palette.length && !near; p++) {
+        var dr = palette[p][0] - c[0], dg = palette[p][1] - c[1], db = palette[p][2] - c[2];
+        near = dr * dr + dg * dg + db * db < limit;
+      }
+      if (!near || gap === 0) { palette.push(c); taken[i] = 1; }
+    }
+  });
+  return palette;
+}
+function gifMapper(palette, transparent) {
+  var cache = new Int16Array(32768).fill(-1);
+  return function (px) {
+    var out = new Uint8Array(px.length / 4);
+    for (var i = 0, o = 0; i < px.length; i += 4, o++) {
+      if (transparent && px[i + 3] < GIF_ALPHA_CUT) { out[o] = GIF_KEEP; continue; }
+      var key = colorKey(px[i], px[i + 1], px[i + 2]);
+      var hit = cache[key];
+      if (hit < 0) {
+        var r = px[i], g = px[i + 1], b = px[i + 2], best = 1e9;
+        for (var p = 0; p < palette.length; p++) {
+          var dr = palette[p][0] - r, dg = palette[p][1] - g, db = palette[p][2] - b;
+          var d = dr * dr * 2 + dg * dg * 4 + db * db * 3;
+          if (d < best) { best = d; hit = p; }
+        }
+        cache[key] = hit;
+      }
+      out[o] = hit;
+    }
+    return out;
+  };
+}
+function lzwEncode(indices) {
+  var minSize = 8, clearCode = 256, endCode = 257;
+  var out = [], acc = 0, bits = 0, size = minSize + 1, next = endCode + 1;
+  var table = new Map();
+  function emit(code) {
+    acc |= code << bits; bits += size;
+    while (bits >= 8) { out.push(acc & 255); acc >>>= 8; bits -= 8; }
+  }
+  emit(clearCode);
+  var cur = indices[0];
+  for (var i = 1; i < indices.length; i++) {
+    var k = indices[i], key = (cur << 8) | k, found = table.get(key);
+    if (found !== undefined) { cur = found; continue; }
+    emit(cur);
+    if (next === 4096) {
+      emit(clearCode);
+      table.clear(); next = endCode + 1; size = minSize + 1;
+    } else {
+      if (next >= (1 << size)) size++;
+      table.set(key, next++);
+    }
+    cur = k;
+  }
+  emit(cur);
+  emit(endCode);
+  if (bits > 0) out.push(acc & 255);
+  return out;
+}
+/* Only the box that changed since the last frame is stored, and inside
+   it the untouched pixels are written as "keep". */
+function gifFrame(idx, prev, w, h) {
+  if (!prev) return { x: 0, y: 0, w: w, h: h, data: lzwEncode(idx) };
+  var x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      if (idx[y * w + x] !== prev[y * w + x]) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return null;
+  var fw = x1 - x0 + 1, fh = y1 - y0 + 1, part = new Uint8Array(fw * fh);
+  for (var yy = 0; yy < fh; yy++) {
+    for (var xx = 0; xx < fw; xx++) {
+      var at = (y0 + yy) * w + x0 + xx;
+      part[yy * fw + xx] = idx[at] === prev[at] ? GIF_KEEP : idx[at];
+    }
+  }
+  return { x: x0, y: y0, w: fw, h: fh, data: lzwEncode(part) };
+}
+function writeGif(w, h, palette, frames, loop) {
+  var bytes = [];
+  function u16(v) { bytes.push(v & 255, (v >> 8) & 255); }
+  function ascii(t) { for (var i = 0; i < t.length; i++) bytes.push(t.charCodeAt(i)); }
+  ascii("GIF89a"); u16(w); u16(h);
+  bytes.push(0xF7, 0, 0);
+  for (var c = 0; c < 256; c++) { var col = palette[c] || [0, 0, 0]; bytes.push(col[0], col[1], col[2]); }
+  if (loop) { bytes.push(0x21, 0xFF, 0x0B); ascii("NETSCAPE2.0"); bytes.push(3, 1); u16(0); bytes.push(0); }
+  frames.forEach(function (f) {
+    bytes.push(0x21, 0xF9, 4, (1 << 2) | 1);
+    u16(Math.max(2, Math.round(f.delay / 10)));
+    bytes.push(GIF_KEEP, 0);
+    bytes.push(0x2C); u16(f.x); u16(f.y); u16(f.w); u16(f.h); bytes.push(0);
+    bytes.push(8);
+    for (var i = 0; i < f.data.length; i += 255) {
+      var chunk = f.data.slice(i, i + 255);
+      bytes.push(chunk.length);
+      for (var j = 0; j < chunk.length; j++) bytes.push(chunk[j]);
+    }
+    bytes.push(0);
+  });
+  bytes.push(0x3B);
+  return new Uint8Array(bytes);
+}
+
+var gifCanvas = null;
+function rasterize(svg, w, h, done, fail) {
+  var url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
+  var image = new Image();
+  image.onload = function () {
+    if (!gifCanvas) gifCanvas = document.createElement("canvas");
+    gifCanvas.width = w; gifCanvas.height = h;
+    var g = gifCanvas.getContext("2d", { willReadFrequently: true });
+    g.clearRect(0, 0, w, h);
+    g.drawImage(image, 0, 0, w, h);
+    URL.revokeObjectURL(url);
+    done(g.getImageData(0, 0, w, h).data);
+  };
+  image.onerror = function () { URL.revokeObjectURL(url); fail(); };
+  image.src = url;
+}
+
+/* The frames follow Play: the same order, the same speed setting and
+   the same 200ms fade (skipped when transparent, since GIF has no soft
+   edges). The last frame holds so the finished sheet can be read. */
+function gifPlan(opts) {
+  var keys = revealOrder();
+  if (!opts.animated || !keys.length) return { keys: keys, frames: [{ visible: Infinity, partial: 0, delay: 0 }] };
+  var step = parseInt($("speed").value, 10) || 700;
+  var frames = [{ visible: 0, partial: 0, delay: 500 }];
+  keys.forEach(function (key, i) {
+    if (opts.background) {
+      frames.push({ visible: i, partial: 1 / 3, delay: 70 }, { visible: i, partial: 2 / 3, delay: 70 });
+      frames.push({ visible: i + 1, partial: 0, delay: Math.max(60, step - 140) });
+    } else {
+      frames.push({ visible: i + 1, partial: 0, delay: step });
+    }
+  });
+  frames[frames.length - 1].delay += 2500;
+  return { keys: keys, frames: frames };
+}
+function exportGif(opts, onProgress, onDone, onFail) {
+  var p = page(), w = Math.round(p.w * opts.scale), h = Math.round(p.h * opts.scale);
+  var plan = gifPlan(opts), order = {};
+  plan.keys.forEach(function (k, i) { order[k] = i; });
+  var job = { cancelled: false };
+
+  function svgFor(f) {
+    return buildSvgString(true, {
+      transparent: !opts.background,
+      opacityOf: function (key) {
+        var i = order[key];
+        if (i === undefined) return 1;
+        return i < f.visible ? 1 : i === f.visible ? f.partial : 0;
+      }
+    });
+  }
+  stopReveal();
+  sel.clear(); closeEditor(true); render();
+  rasterize(svgFor({ visible: Infinity, partial: 0 }), w, h, function (finished) {
+    var palette = gifPalette(gifHistogram(finished, !opts.background), 255);
+    var toIndices = gifMapper(palette, !opts.background);
+    var frames = [], prev = null, i = 0;
+    (function next() {
+      if (job.cancelled) return;
+      if (i >= plan.frames.length) { onDone(writeGif(w, h, palette, frames, opts.animated)); return; }
+      onProgress(i, plan.frames.length);
+      var f = plan.frames[i++];
+      rasterize(svgFor(f), w, h, function (px) {
+        var idx = toIndices(px);
+        var frame = gifFrame(idx, prev, w, h);
+        if (frame) { frame.delay = f.delay; frames.push(frame); }
+        else if (frames.length) frames[frames.length - 1].delay += f.delay;
+        prev = idx;
+        setTimeout(next, 0);
+      }, onFail);
+    })();
+  }, onFail);
+  return job;
+}
+
+function showGifExport() {
+  closeMenus();
+  openModal(function (m) {
+    var o = gifOptions;
+    m.appendChild(htmlEl("h2", null, "Export a GIF"));
+    var speedName = $("speed").options[$("speed").selectedIndex].text.toLowerCase();
+    m.appendChild(htmlEl("p", "sub", o.animated
+      ? "Plays the reveal in the same order as Play, at your " + speedName + " speed, then holds on the finished sheet."
+      : "One still picture of the sheet."));
+
+    function choice(label, options, current, set) {
+      var row = htmlEl("div", "gif-row");
+      row.appendChild(htmlEl("span", "gif-label", label));
+      var group = htmlEl("span", "gif-seg");
+      options.forEach(function (opt) {
+        group.appendChild(toolButton({
+          label: opt[1], pressed: current === opt[0],
+          onClick: function () { set(opt[0]); showGifExport(); }
+        }));
+      });
+      row.appendChild(group);
+      m.appendChild(row);
+    }
+    choice("Motion", [[true, "Animated reveal"], [false, "Still picture"]], o.animated, function (v) { o.animated = v; });
+    choice("Background", [[true, "Paper"], [false, "Transparent"]], o.background, function (v) { o.background = v; });
+    choice("Size", [[1, "1×"], [2, "2×"]], o.scale, function (v) { o.scale = v; });
+    if (!o.background) {
+      m.appendChild(htmlEl("p", "gif-note", "GIF transparency is all or nothing, so very faint marks drop out and elements pop in without fading."));
+    }
+    var status = htmlEl("p", "gif-note gif-status", "");
+    m.appendChild(status);
+
+    var foot = htmlEl("div", "modal-foot");
+    foot.appendChild(toolButton({ label: "Cancel", onClick: closeModal }));
+    var go = toolButton({ label: "Export GIF", onClick: function () {
+      go.disabled = true;
+      status.textContent = "Drawing the frames…";
+      gifJob = exportGif(o, function (done, total) {
+        status.textContent = total > 1 ? "Drawing frame " + (done + 1) + " of " + total + "…" : "Drawing…";
+      }, function (bytes) {
+        gifJob = null;
+        download(fileBase() + (o.animated ? "" : "-still") + ".gif", new Blob([bytes], { type: "image/gif" }));
+        closeModal();
+        toast("Saved the GIF (" + (bytes.length / 1048576).toFixed(1) + " MB)");
+      }, function () {
+        gifJob = null;
+        status.textContent = "This browser could not draw the sheet. Try the SVG export instead.";
+        go.disabled = false;
+      });
+    } });
+    go.classList.add("accent");
+    foot.appendChild(go);
+    m.appendChild(foot);
+  });
+}
+
 function exportSvg() { download(fileBase() + ".svg", buildSvgString(true), "image/svg+xml"); toast("Saved the SVG"); }
 function exportHtml() {
   var body = buildSvgString(false);
@@ -3753,7 +4048,7 @@ function newDoc() {
    25. Modals
    ================================================================ */
 var scrim = $("scrim"), modal = $("modal");
-function closeModal() { scrim.hidden = true; clear(modal); }
+function closeModal() { if (gifJob) { gifJob.cancelled = true; gifJob = null; } scrim.hidden = true; clear(modal); }
 scrim.addEventListener("pointerdown", function (e) { if (e.target === scrim) closeModal(); });
 
 function openModal(build) { clear(modal); build(modal); scrim.hidden = false; }
