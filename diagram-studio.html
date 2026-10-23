@@ -255,6 +255,7 @@ svg#stage.grabbing { cursor: grabbing; }
 svg#stage.grabby { cursor: grab; }
 svg#stage.crossy { cursor: crosshair; }
 svg#stage.texty { cursor: text; }
+svg#stage.painty { cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 18 18'><g fill='white' stroke='%2323231F' stroke-width='1.3' stroke-linejoin='round'><path d='M15.2 2.8 L9.4 9.6 L8.4 8.6 Z'/><path d='M8.2 9 C6.2 8.6 4.6 9.8 4.4 11.8 C4.2 13.6 3.4 14.6 2.6 15.2 C5.6 15.6 8.6 14.6 9.2 12 C9.4 11 9.2 10 8.2 9 Z'/></g></svg>") 3 21, copy; }
 
 .no-texture #shapes g[data-key] { filter: none !important; }
 #overlay .col-grip { fill: transparent; cursor: col-resize; }
@@ -614,6 +615,7 @@ var ICONS = {
   colAdd: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="2.5" width="6" height="13" rx="1.2"/><path d="M11.2 9 H16 M13.6 6.6 V11.4"/></g>',
   colDel: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.5" y="2.5" width="6" height="13" rx="1.2"/><path d="M11.2 9 H16"/></g>',
   sketch: '<g fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.6 5 L15.4 4.4 L15.2 13.2 L2.8 13.6 Z"/></g><g stroke="currentColor" stroke-width="0.9" opacity="0.55"><path d="M4 12.5 L7 6"/><path d="M7 12.5 L10 6"/><path d="M10 12.5 L13 6"/></g>',
+  brush: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M15.2 2.8 L9.4 9.6 L8.4 8.6 Z" stroke-linecap="round"/><path d="M8.2 9 C6.2 8.6 4.6 9.8 4.4 11.8 C4.2 13.6 3.4 14.6 2.6 15.2 C5.6 15.6 8.6 14.6 9.2 12 C9.4 11 9.2 10 8.2 9 Z"/></g>',
   pen: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.8 3.2 L14.8 6.2 L6.6 14.4 L3 15 L3.6 11.4 Z"/><path d="M10.4 4.6 L13.4 7.6"/></g>',
   text: '<path d="M3.5 4 H14.5 M9 4 V14.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   connect: '<g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 13 C5 5.5, 10 4, 14.5 5.5"/><path d="M11.5 4.2 L14.8 5.4 L13.4 8.6"/></g>',
@@ -2471,6 +2473,104 @@ function distributeSelected(axis) {
 }
 
 /* ================================================================
+   14b. Copying a look from one item to another
+        A copied style is a small bag of looks that every kind of item
+        can read from: colours cross between kinds (a box outline paints
+        an arrow's line or a drawing's ink), while sizes and thickness
+        only cross between items of the same kind, since a box title and
+        an arrow label use different scales.
+   ================================================================ */
+var paintStyle = null;     /* the copied look */
+var paintSticky = false;   /* true when the brush stays on for several clicks */
+var TEXT_FLAGS = ["bold", "italic", "underline", "strike"];
+
+function kindOf(found) {
+  if (found.kind !== "node") return found.kind;
+  return found.item.type === "image" || found.item.type === "ink" || found.item.type === "table" ? found.item.type : "shape";
+}
+function styleOf(found) {
+  var it = found.item, kind = kindOf(found), st = { kind: kind };
+  if (kind === "shape" || kind === "table") {
+    st.line = it.accent; st.fill = it.fill; st.filled = it.filled; st.style = it.style;
+    st.textColor = it.titleColor; st.size = it.titleSize;
+    if (kind === "table") st.header = !!it.header;
+  } else if (kind === "edge") {
+    st.line = it.color; st.textColor = it.labelColor || it.color; st.size = it.labelSize;
+    st.weight = it.weight; st.dashed = !!it.dashed; st.head = it.head; st.tail = it.tail; st.onPath = it.onPath;
+  } else if (kind === "text") {
+    st.line = it.color; st.textColor = it.color; st.size = it.size; st.anchor = it.anchor;
+  } else if (kind === "ink") {
+    st.line = it.accent; st.weight = it.weight;
+  } else if (kind === "image") {
+    st.line = it.accent; st.frame = !!it.frame; st.wobble = !!it.wobble;
+  }
+  if (kind === "shape" || kind === "table" || kind === "edge" || kind === "text") {
+    TEXT_FLAGS.forEach(function (k) { st[k] = !!it[k]; });
+  }
+  return st;
+}
+function applyStyle(found, st) {
+  var it = found.item, kind = kindOf(found);
+  var same = st.kind === kind || ((st.kind === "shape" || st.kind === "table") && (kind === "shape" || kind === "table"));
+  function set(key, v) { if (v !== undefined && v !== null) it[key] = v; }
+  if (kind === "shape" || kind === "table") {
+    set("accent", st.line); set("fill", st.fill); set("filled", st.filled); set("style", st.style);
+    set("titleColor", st.textColor);
+    if (same) set("titleSize", st.size);
+    if (kind === "table" && st.kind === "table") set("header", st.header);
+  } else if (kind === "edge") {
+    set("color", st.line); set("labelColor", st.textColor);
+    if (same) { set("labelSize", st.size); set("weight", st.weight); set("dashed", st.dashed); set("head", st.head); set("tail", st.tail); set("onPath", st.onPath); }
+  } else if (kind === "text") {
+    set("color", st.textColor || st.line);
+    if (same) { set("size", st.size); set("anchor", st.anchor); }
+  } else if (kind === "ink") {
+    set("accent", st.line);
+    if (same) set("weight", st.weight);
+  } else if (kind === "image") {
+    set("accent", st.line);
+    if (same) { set("frame", st.frame); set("wobble", st.wobble); }
+  }
+  if (st.bold !== undefined && (kind === "shape" || kind === "table" || kind === "edge" || kind === "text")) {
+    TEXT_FLAGS.forEach(function (k) { it[k] = st[k]; });
+  }
+}
+function copyStyle(sticky) {
+  var f = firstSel();
+  if (!f) return toast("Select something to copy its style");
+  paintStyle = styleOf(f);
+  paintSticky = !!sticky;
+  setTool("paint");
+}
+function pasteStyle() {
+  if (!paintStyle) return toast("Copy a style first: " + MOD + "+Alt+C");
+  var list = selList();
+  if (!list.length) return toast("Select something to paste the style onto");
+  list.forEach(function (f) { applyStyle(f, paintStyle); });
+  commit(); render();
+  toast(list.length === 1 ? "Style pasted" : "Style pasted onto " + list.length + " items");
+}
+/* One click on the brush paints one item; a double click keeps it on.
+   Clicking it again while it is on puts it down. The bar is rebuilt
+   after the first click, so the double click is told apart by timing
+   rather than by a dblclick event. */
+var lastBrushClick = 0;
+function brushButton() {
+  var on = tool === "paint";
+  return toolButton({
+    icon: "brush", pressed: on,
+    title: on ? (paintSticky ? "Painting: click items, Esc to stop" : "Click an item to paint it") : "Copy this style  (double click to paint several)",
+    onClick: function () {
+      var now = Date.now(), quick = now - lastBrushClick < 400;
+      lastBrushClick = now;
+      if (quick) copyStyle(true);
+      else if (tool === "paint") setTool("select");
+      else copyStyle(false);
+    }
+  });
+}
+
+/* ================================================================
    15. Tools
    ================================================================ */
 var TOOLS = [
@@ -2509,7 +2609,11 @@ function setTool(next) {
   else if (tool === "pan") setHint("Drag to move the sheet around.");
   else if (tool === "pen") setHint("Draw on the canvas. Strokes made close together, one after another, stay one drawing. V or Esc to stop.");
   else if (toolShape(tool)) setHint("Click to place it, or drag to size it as you go.");
+  else if (tool === "paint") setHint(paintSticky
+    ? "Click items to give them this style. Esc or a click on empty canvas stops."
+    : "Click an item to give it this style.");
   else setHint("Double click a shape to type. Drag from an edge dot to draw an arrow.");
+  if (tool !== "paint") paintSticky = false;
   if (tool === "pen") { sel.clear(); closeEditor(true); }
   lastInk = null;
   drawOverlay();
@@ -2521,6 +2625,7 @@ function updateCursor() {
   stage.classList.toggle("grabby", !drag && (tool === "pan" || spaceDown));
   stage.classList.toggle("crossy", tool === "connect" || tool === "pen" || !!toolShape(tool));
   stage.classList.toggle("texty", tool === "text");
+  stage.classList.toggle("painty", tool === "paint");
 }
 
 /* ================================================================
@@ -2595,6 +2700,16 @@ stage.addEventListener("pointerdown", function (event) {
     stage.setPointerCapture(event.pointerId);
     updateCursor();
     event.preventDefault();
+    return;
+  }
+
+  if (tool === "paint") {
+    var target = d.nodeId || d.edgeId || d.textId || d.handleEdge || d.anchorNode || d.colNode || d.resizeNode;
+    var found = target ? findAny(target) : null;
+    if (!found) { setTool("select"); return; }
+    applyStyle(found, paintStyle);
+    commit(); render();
+    if (!paintSticky) { setTool("select"); selectOnly(found.item.id); }
     return;
   }
 
@@ -3006,12 +3121,12 @@ function defaultField(id, point) {
 }
 stage.addEventListener("dblclick", function (event) {
   var id = idFromTarget(event.target);
-  if (!id || tool === "pen") return;
+  if (!id || tool === "pen" || tool === "paint") return;
   event.preventDefault();
   openEditor(id, defaultField(id, toStage(event)));
 });
 stage.addEventListener("pointerdown", function (event) {
-  if (event.button !== 0 || tool === "pen") return;
+  if (event.button !== 0 || tool === "pen" || tool === "paint") return;
   var id = idFromTarget(event.target);
   var now = Date.now();
   var point = toStage(event);
@@ -3662,6 +3777,7 @@ function renderBubble() {
   }
 
   bubble.appendChild(divider());
+  bubble.appendChild(brushButton());
   bubble.appendChild(toolButton({ icon: "front", title: "Bring to front", onClick: function () { reorder("front"); } }));
   bubble.appendChild(toolButton({ icon: "back", title: "Send to back", onClick: function () { reorder("back"); } }));
   bubble.appendChild(toolButton({ icon: "copy", title: "Duplicate", onClick: duplicateSelected }));
@@ -3888,6 +4004,9 @@ function editMenu() {
     { label: "Paste", key: MOD + "+V", disabled: !clipboard, run: pasteClipboard },
     { label: "Duplicate", icon: "copy", key: MOD + "+D", disabled: !sel.size, run: duplicateSelected },
     "-",
+    { label: "Copy style", icon: "brush", key: MOD + "+Alt+C", disabled: !sel.size, run: function () { copyStyle(false); } },
+    { label: "Paste style", key: MOD + "+Alt+V", disabled: !sel.size || !paintStyle, run: pasteStyle },
+    "-",
     { label: "Select everything", key: MOD + "+A", run: selectAll },
     { label: "Delete", icon: "trash", key: "Del", danger: true, disabled: !sel.size, run: deleteSelected }
   ];
@@ -3919,6 +4038,8 @@ function openContextMenu(x, y) {
       { label: "Edit text", icon: "text", run: function () { var f = firstSel(); if (f) openEditor(f.item.id, defaultField(f.item.id)); } },
       { label: "Duplicate", icon: "copy", key: MOD + "+D", run: duplicateSelected },
       { label: "Copy", run: copySelected },
+      { label: "Copy style", icon: "brush", key: MOD + "+Alt+C", run: function () { copyStyle(false); } },
+      { label: "Paste style", key: MOD + "+Alt+V", disabled: !paintStyle, run: pasteStyle },
       "-",
       { label: "Bring to front", icon: "front", run: function () { reorder("front"); } },
       { label: "Send to back", icon: "back", run: function () { reorder("back"); } }
@@ -5008,6 +5129,7 @@ function showShortcuts() {
      ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
      [MOD + " + Z", "Undo"], [MOD + " + Shift + Z", "Redo"],
      [MOD + " + C  V  X", "Copy, paste, cut"], [MOD + " + D", "Duplicate"],
+     [MOD + " + Alt + C  V", "Copy a style, paste it onto the selection"],
      [MOD + " + A", "Select everything"], ["Delete", "Remove the selection"],
      ["Arrows", "Nudge by one"], ["Shift + arrows", "Nudge by ten"],
      ["Space + drag", "Move around the canvas"], ["Right drag", "Move around the canvas"], ["Scroll", "Move around the canvas"],
@@ -5099,6 +5221,9 @@ document.addEventListener("keydown", function (event) {
   if (!scrim.hidden) { if (event.key === "Escape") closeModal(); return; }
 
   if (mod) {
+    /* by key position, since Option changes the letter on a Mac */
+    if (event.altKey && event.code === "KeyC") { event.preventDefault(); copyStyle(false); return; }
+    if (event.altKey && event.code === "KeyV") { event.preventDefault(); pasteStyle(); return; }
     var k = event.key.toLowerCase();
     if (k === "z") { event.preventDefault(); if (event.shiftKey) redo(); else undo(); return; }
     if (k === "y") { event.preventDefault(); redo(); return; }
