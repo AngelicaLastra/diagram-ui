@@ -231,22 +231,12 @@ svg { display: block; }
 .order-head [data-tip]:hover::after { white-space: normal; width: 190px; }
 
 /* ---------------- stage ---------------- */
-.stagewrap {
-  position: relative; flex: 1 1 auto; min-width: 0;
-  overflow: auto; padding: 22px;
-  display: flex; align-items: flex-start; justify-content: center;
-  background:
-    radial-gradient(circle at 1px 1px, rgba(35,35,31,.055) 1px, transparent 0) 0 0 / 22px 22px,
-    var(--shell);
-}
+.stagewrap { position: relative; flex: 1 1 auto; min-width: 0; overflow: hidden; background: var(--paper); }
 .sheet {
-  position: relative; user-select: none; -webkit-user-select: none;
-  width: 100%; max-width: 1020px;
-  background: var(--paper); border: 1px solid var(--hair);
-  border-radius: 10px; box-shadow: 0 2px 10px rgba(35,35,31,.07);
-  overflow: hidden;
+  position: absolute; inset: 0; user-select: none; -webkit-user-select: none;
+  background: var(--paper); overflow: hidden;
 }
-svg#stage { display: block; width: 100%; height: auto; touch-action: none; cursor: default; }
+svg#stage { display: block; width: 100%; height: 100%; touch-action: none; cursor: default; }
 svg#stage.grabbing { cursor: grabbing; }
 svg#stage.grabby { cursor: grab; }
 svg#stage.crossy { cursor: crosshair; }
@@ -442,7 +432,7 @@ input[type="color"] {
       <button type="button" class="btn icon" id="btnZoomOut" data-tip="Zoom out" aria-label="Zoom out"></button>
       <span id="zoomLabel" class="zoom-label">100%</span>
       <button type="button" class="btn icon" id="btnZoomIn" data-tip="Zoom in" aria-label="Zoom in"></button>
-      <button type="button" class="btn" id="btnFit" data-tip="Fit the whole sheet">Fit</button>
+      <button type="button" class="btn" id="btnFit" data-tip="Fit everything you have drawn">Fit</button>
     </span>
 
     <span class="group">
@@ -828,7 +818,12 @@ var bubble = $("bubble"), inlineInput = $("inlineEdit");
 
 function setHint(msg) { $("hint").textContent = msg; }
 
-function viewScale() { return sheet.getBoundingClientRect().width / view.w; }
+var MIN_ZOOM = 0.1, MAX_ZOOM = 4;
+function stageSize() {
+  var r = stage.getBoundingClientRect();
+  return { w: r.width || 900, h: r.height || 660 };
+}
+function viewScale() { return stageSize().w / view.w; }
 
 function toStage(event) {
   var box = stage.getBoundingClientRect();
@@ -839,29 +834,57 @@ function toScreen(x, y) {
   var k = viewScale();
   return { x: (x - view.x) * k, y: (y - view.y) * k, k: k };
 }
+/* The canvas has no edges. 100% means one unit to one screen pixel, and
+   the paper and grid are stretched over whatever is in view. */
 function applyView() {
-  var p = page();
-  view.w = clamp(view.w, 120, p.w * 4);
-  view.h = view.w * (p.h / p.w);
-  view.x = clamp(view.x, -p.w * 0.6, p.w * 1.6 - view.w);
-  view.y = clamp(view.y, -p.h * 0.6, p.h * 1.6 - view.h);
+  var px = stageSize();
+  view.w = clamp(view.w, px.w / MAX_ZOOM, px.w / MIN_ZOOM);
+  view.h = view.w * (px.h / px.w);
   stage.setAttribute("viewBox", [view.x, view.y, view.w, view.h].map(function (v) { return v.toFixed(1); }).join(" "));
-  $("zoomLabel").textContent = Math.round((p.w / view.w) * 100) + "%";
+  $("zoomLabel").textContent = Math.round((px.w / view.w) * 100) + "%";
+  paintPaper();
+  drawOverlay();
   placeBubble();
   layoutEditor();
 }
+function paintPaper() {
+  var cover = { x: view.x - 2, y: view.y - 2, width: view.w + 4, height: view.h + 4 };
+  setAttrs($("bg"), cover);
+  setAttrs($("gridRect"), Object.assign({ fill: gridOn ? "url(#grid)" : "none" }, cover));
+}
+/* Everything drawn on the sheet, in canvas units, or null when empty. */
+function contentBounds() {
+  var boxes = [shapesLayer, labelsLayer].map(function (layer) {
+    if (!layer.childNodes.length) return null;
+    var b = layer.getBBox();
+    return b.width || b.height ? b : null;
+  }).filter(Boolean);
+  if (!boxes.length) return null;
+  var x0 = Math.min.apply(null, boxes.map(function (b) { return b.x; }));
+  var y0 = Math.min.apply(null, boxes.map(function (b) { return b.y; }));
+  var x1 = Math.max.apply(null, boxes.map(function (b) { return b.x + b.width; }));
+  var y1 = Math.max.apply(null, boxes.map(function (b) { return b.y + b.height; }));
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
 function zoomAround(focus, factor) {
-  var p = page();
-  var next = clamp(view.w * factor, p.w / 6, p.w * 3);
+  var px = stageSize();
+  var next = clamp(view.w * factor, px.w / MAX_ZOOM, px.w / MIN_ZOOM);
   var scale = next / view.w;
   view.x = focus.x - (focus.x - view.x) * scale;
   view.y = focus.y - (focus.y - view.y) * scale;
   view.w = next;
   applyView();
 }
+/* Fit what is drawn, never zooming in past 100%. An empty sheet opens
+   at 100% with the origin near the top left. */
 function fitView() {
-  var p = page();
-  view.x = 0; view.y = 0; view.w = p.w; view.h = p.h;
+  var px = stageSize(), b = contentBounds(), pad = 60;
+  if (!b) { view.w = px.w; view.x = -40; view.y = -40; applyView(); return; }
+  var k = Math.min(1, px.w / (b.w + pad * 2), px.h / (b.h + pad * 2));
+  view.w = px.w / k;
+  view.h = px.h / k;
+  view.x = b.x + b.w / 2 - view.w / 2;
+  view.y = b.y + b.h / 2 - view.h / 2;
   applyView();
 }
 function snap(value) {
@@ -1584,8 +1607,7 @@ function drawFreeText(item) {
 
 function renderCanvas() {
   var p = page();
-  setAttrs($("bg"), { width: p.w, height: p.h });
-  setAttrs($("gridRect"), { width: p.w, height: p.h, fill: gridOn ? "url(#grid)" : "none" });
+  paintPaper();
 
   Array.prototype.forEach.call(defs.querySelectorAll("[data-generated]"), function (n) {
     n.parentNode.removeChild(n);
@@ -1656,7 +1678,7 @@ function selectionBox() {
   });
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
-function ov() { return view.w / 900; }  /* keep overlay furniture a constant screen size */
+function ov() { return 1 / viewScale(); }  /* keep overlay furniture a constant screen size */
 
 function handleRect(x, y, data) {
   var s = 4 * ov();
@@ -1811,8 +1833,6 @@ function computeGuides(movingIds, box) {
   var tol = 5 * ov();
   var others = nodes().filter(function (n) { return movingIds.indexOf(n.id) < 0; })
     .map(function (n) { return { x: n.x, y: n.y, w: n.w, h: n.h }; });
-  var p = page();
-  others.push({ x: 0, y: 0, w: p.w, h: p.h });
 
   var dx = null, dy = null;
   var bx = [box.x, box.x + box.w / 2, box.x + box.w];
@@ -2218,7 +2238,7 @@ function distributeSelected(axis) {
    ================================================================ */
 var TOOLS = [
   { id: "select",  icon: "select",  title: "Select and move", key: "V" },
-  { id: "pan",     icon: "hand",    title: "Pan the sheet",   key: "H" },
+  { id: "pan",     icon: "hand",    title: "Move around",     key: "H" },
   { sep: true },
   { id: "box",     icon: "box",     title: "Box",             key: "B" },
   { id: "diamond", icon: "diamond", title: "Diamond",         key: "D" },
@@ -2597,14 +2617,21 @@ window.addEventListener("pointercancel", function () {
   render();
 });
 
+/* Scrolling moves around the canvas; Ctrl or Cmd with the wheel, or a
+   trackpad pinch (which arrives as a Ctrl wheel), zooms at the pointer. */
 stage.addEventListener("wheel", function (event) {
   event.preventDefault();
-  if (event.ctrlKey || event.metaKey || !event.shiftKey) {
-    zoomAround(toStage(event), event.deltaY > 0 ? 1.1 : 1 / 1.1);
-  } else {
-    view.x += event.deltaY * (view.w / 900);
-    applyView();
+  var unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stageSize().h : 1;
+  var dx = event.deltaX * unit, dy = event.deltaY * unit;
+  if (event.ctrlKey || event.metaKey) {
+    zoomAround(toStage(event), Math.exp(clamp(dy, -60, 60) * 0.0035));
+    return;
   }
+  if (event.shiftKey && !dx) { dx = dy; dy = 0; }
+  var k = viewScale();
+  view.x += dx / k;
+  view.y += dy / k;
+  applyView();
 }, { passive: false });
 
 var menuPoint = null;
@@ -3527,8 +3554,7 @@ function arrangeMenu() {
     { label: "Spread across", icon: "distH", run: function () { distributeSelected("h"); } },
     { label: "Spread down", icon: "distV", run: function () { distributeSelected("v"); } },
     "-",
-    { label: "Smart guides", checked: guidesOn, run: function () { guidesOn = !guidesOn; persistNow(); } },
-    { label: "Sheet size…", icon: "page", run: showSheetSize }
+    { label: "Smart guides", checked: guidesOn, run: function () { guidesOn = !guidesOn; persistNow(); } }
   ];
 }
 function openContextMenu(x, y) {
@@ -3557,7 +3583,7 @@ function openContextMenu(x, y) {
       { label: "Insert an image…", icon: "image", run: function () { openImagePicker(menuPoint); } },
       { label: "Select everything", run: selectAll },
       "-",
-      { label: "Fit the sheet", run: fitView },
+      { label: "Fit everything", run: fitView },
       { label: gridOn ? "Hide the grid" : "Show the grid", run: function () { gridOn = !gridOn; pressToggle($("btnGrid"), gridOn); render(); persistNow(); } },
       "-",
       { label: "Play the reveal", icon: "play", run: playReveal }
@@ -3920,10 +3946,23 @@ $("orderReset").addEventListener("click", function () {
 /* ================================================================
    24. Export and files
    ================================================================ */
+/* The area an export covers: everything drawn plus a margin, or what is in
+   view when the sheet is empty. */
+function exportBox() {
+  var b = contentBounds(), pad = 32;
+  if (!b) return { x: Math.round(view.x), y: Math.round(view.y), w: Math.round(view.w), h: Math.round(view.h) };
+  return {
+    x: Math.floor(b.x - pad), y: Math.floor(b.y - pad),
+    w: Math.ceil(b.w + pad * 2), h: Math.ceil(b.h + pad * 2)
+  };
+}
+
 /* opts.transparent drops the paper and grid; opts.opacityOf(key) lets the
-   GIF export draw any moment of the reveal. */
+   GIF export draw any moment of the reveal; opts.box fixes the area so
+   every GIF frame lines up. */
 function buildSvgString(withSize, opts) {
   opts = opts || {};
+  var box = opts.box || exportBox();
   var copy = stage.cloneNode(true);
   ["overlay", "hits"].concat(opts.transparent ? ["bg", "gridRect"] : []).forEach(function (id) {
     var g = copy.querySelector("#" + id);
@@ -3935,11 +3974,16 @@ function buildSvgString(withSize, opts) {
   if (!textureOn) {
     Array.prototype.forEach.call(copy.querySelectorAll("#shapes g[data-key]"), function (g) { g.removeAttribute("filter"); });
   }
-  var p = page();
-  copy.setAttribute("viewBox", "0 0 " + p.w + " " + p.h);
+  ["bg", "gridRect"].forEach(function (id) {
+    var r = copy.querySelector("#" + id);
+    if (r) setAttrs(r, { x: box.x, y: box.y, width: box.w, height: box.h });
+  });
+  copy.setAttribute("viewBox", [box.x, box.y, box.w, box.h].join(" "));
   copy.setAttribute("xmlns", NS);
   copy.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
-  if (withSize) { copy.setAttribute("width", p.w); copy.setAttribute("height", p.h); }
+  if (withSize) { copy.setAttribute("width", box.w); copy.setAttribute("height", box.h); }
+  copy.removeAttribute("style");
+  copy.removeAttribute("class");
   return new XMLSerializer().serializeToString(copy);
 }
 function download(filename, data, type) {
@@ -3954,8 +3998,8 @@ function fileBase() {
   return (doc.title || "diagram").replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-").toLowerCase() || "diagram";
 }
 function exportPng(scale) {
-  var p = page();
-  var svgBlob = new Blob([buildSvgString(true)], { type: "image/svg+xml;charset=utf-8" });
+  var p = exportBox();
+  var svgBlob = new Blob([buildSvgString(true, { box: p })], { type: "image/svg+xml;charset=utf-8" });
   var url = URL.createObjectURL(svgBlob);
   var image = new Image();
   image.onload = function () {
@@ -4159,13 +4203,16 @@ function gifPlan(opts) {
   return { steps: steps, frames: frames };
 }
 function exportGif(opts, onProgress, onDone, onFail) {
-  var p = page(), w = Math.round(p.w * opts.scale), h = Math.round(p.h * opts.scale);
+  stopReveal();
+  sel.clear(); closeEditor(true); render();
+  var box = exportBox(), w = Math.round(box.w * opts.scale), h = Math.round(box.h * opts.scale);
   var plan = gifPlan(opts), order = {};
   plan.steps.forEach(function (keys, i) { keys.forEach(function (k) { order[k] = i; }); });
   var job = { cancelled: false };
 
   function svgFor(f) {
     return buildSvgString(true, {
+      box: box,
       transparent: !opts.background,
       opacityOf: function (key) {
         var i = order[key];
@@ -4174,8 +4221,6 @@ function exportGif(opts, onProgress, onDone, onFail) {
       }
     });
   }
-  stopReveal();
-  sel.clear(); closeEditor(true); render();
   rasterize(svgFor({ visible: Infinity, partial: 0 }), w, h, function (finished) {
     var palette = gifPalette(gifHistogram(finished, !opts.background), 255);
     var toIndices = gifMapper(palette, !opts.background);
@@ -4368,7 +4413,8 @@ function showShortcuts() {
      [MOD + " + C  V  X", "Copy, paste, cut"], [MOD + " + D", "Duplicate"],
      [MOD + " + A", "Select everything"], ["Delete", "Remove the selection"],
      ["Arrows", "Nudge by one"], ["Shift + arrows", "Nudge by ten"],
-     ["Space + drag", "Pan the sheet"], ["Scroll", "Zoom around the pointer"],
+     ["Space + drag", "Move around the canvas"], ["Scroll", "Move around the canvas"],
+     [MOD + " + scroll", "Zoom at the pointer (or pinch)"],
      ["Shift + drag", "Keep a move on one axis"], ["Alt + place", "Keep the shape tool active"],
      ["Shift + click", "Add to the selection, or stretch a table cell pick"], ["?", "This list"]]
       .forEach(function (row) {
@@ -4385,34 +4431,6 @@ function showShortcuts() {
     m.appendChild(foot);
   });
 }
-function showSheetSize() {
-  openModal(function (m) {
-    var p = page();
-    m.appendChild(htmlEl("h2", null, "Sheet size"));
-    m.appendChild(htmlEl("p", "sub", "This is the area that gets exported."));
-    var row = htmlEl("div");
-    row.style.cssText = "display:flex;gap:10px;align-items:center";
-    var w = numberControl(p.w, 200, 6000, "Width", function () {}, 10);
-    var h = numberControl(p.h, 200, 6000, "Height", function () {}, 10);
-    w.style.width = "90px"; h.style.width = "90px";
-    row.appendChild(htmlEl("span", null, "Width"));
-    row.appendChild(w);
-    row.appendChild(htmlEl("span", null, "Height"));
-    row.appendChild(h);
-    m.appendChild(row);
-    var foot = htmlEl("div", "modal-foot");
-    foot.appendChild(toolButton({ label: "Cancel", onClick: closeModal }));
-    var ok = toolButton({ label: "Apply", onClick: function () {
-      p.w = clamp(parseInt(w.value, 10) || p.w, 200, 6000);
-      p.h = clamp(parseInt(h.value, 10) || p.h, 200, 6000);
-      closeModal(); commit(); render(); fitView();
-    } });
-    ok.classList.add("accent");
-    foot.appendChild(ok);
-    m.appendChild(foot);
-  });
-}
-
 /* ================================================================
    26. Top bar wiring
    ================================================================ */
