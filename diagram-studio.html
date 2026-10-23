@@ -202,14 +202,8 @@ svg { display: block; }
 }
 .step:hover .step-num { background: var(--pill-on); color: var(--ink); }
 .step-items { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.step { position: relative; }
-.step-tools {
-  position: absolute; top: 5px; right: 5px; display: flex; align-items: center; gap: 1px;
-  padding-left: 10px; background: linear-gradient(90deg, transparent, var(--paper) 10px);
-  opacity: 0; pointer-events: none; transition: opacity 120ms;
-}
-.step.picked .step-tools { background: linear-gradient(90deg, transparent, var(--shell) 10px); }
-.step:hover .step-tools, .step:focus-within .step-tools { opacity: 1; pointer-events: auto; }
+.step-tools { flex: 0 0 20px; display: flex; margin-top: 1px; opacity: 0; transition: opacity 120ms; }
+.step:hover .step-tools, .step:focus-within .step-tools { opacity: 1; }
 .step:hover .step-tools, .step:focus-within .step-tools { opacity: 1; }
 .step-tools .btn { width: 20px; height: 20px; min-width: 0; padding: 0; border-radius: 4px; color: var(--ink-soft); }
 .step-tools .btn:hover:not(:disabled) { color: var(--ink); }
@@ -219,6 +213,14 @@ svg { display: block; }
   border-radius: 5px; font-size: 12px; color: var(--ink); cursor: grab; text-align: left;
 }
 .chip:hover { background: var(--pill); }
+.chip-row { display: flex; align-items: center; min-width: 0; }
+.chip-row .chip { flex: 1 1 auto; }
+.chip-row > .btn { flex: 0 0 auto; width: 20px; height: 20px; min-width: 0; padding: 0; border-radius: 4px; color: var(--ink-soft); display: none; }
+.chip-row:hover > .btn, .chip-row:focus-within > .btn { display: grid; place-items: center; }
+.chip-row > .btn:hover { color: var(--ink); }
+.chip-row.hides .chip svg, .chip-row.hides .chip-tag { color: var(--red); }
+.chip-row.hides .chip span { color: var(--ink-mid); text-decoration: line-through; text-decoration-color: rgba(221, 75, 68, .55); }
+.chip-tag { flex: 0 0 auto; font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
 .chip svg { flex: 0 0 auto; color: var(--ink-soft); }
 .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip.dim span { color: var(--ink-soft); font-style: italic; }
@@ -227,7 +229,7 @@ svg { display: block; }
 .dragging { opacity: .4; }
 /* the panel clips at its edges, so its tooltips hug the side they start on */
 .order-panel [data-tip]:hover::after { left: 0; transform: none; }
-.order-panel .step-tools [data-tip]:hover::after, .order-head [data-tip]:hover::after { left: auto; right: 0; }
+.order-panel .step-tools [data-tip]:hover::after, .order-panel .chip-row > [data-tip]:hover::after, .order-head [data-tip]:hover::after { left: auto; right: 0; }
 .order-head [data-tip]:hover::after { white-space: normal; width: 190px; }
 
 /* ---------------- stage ---------------- */
@@ -640,6 +642,9 @@ var ICONS = {
   image: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.8" y="3.9" width="12.4" height="10.2" rx="1.5"/><circle cx="6.6" cy="7.5" r="1.1"/><path d="M3.2 12.3 L7 9 L9.9 11.4 L12 9.6 L14.9 12.1"/></g>',
   code: '<path d="M6.4 5.8 L3 9 L6.4 12.2 M11.6 5.8 L15 9 L11.6 12.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
   lock: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="4" y="7.8" width="10" height="7.2" rx="1.6"/><path d="M6.2 7.8V5.8a2.8 2.8 0 0 1 5.6 0v2"/></g>',
+  eyeOff: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1.6 9S4.3 4.2 9 4.2c1.5 0 2.8.5 3.9 1.1M16.4 9s-1 1.8-2.8 3.2M10.6 13.6c-.5.1-1 .2-1.6.2C4.3 13.8 1.6 9 1.6 9"/><path d="M3 15 L15 3"/></g>',
+  more: '<g fill="currentColor"><circle cx="4.5" cy="9" r="1.4"/><circle cx="9" cy="9" r="1.4"/><circle cx="13.5" cy="9" r="1.4"/></g>',
+  close: '<path d="M5 5 L13 13 M13 5 L5 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   eye: '<g fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.6 9S4.3 4.2 9 4.2 16.4 9 16.4 9 13.7 13.8 9 13.8 1.6 9 1.6 9z"/><circle cx="9" cy="9" r="2.3"/></g>',
   order: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M7.5 4.5 H15 M7.5 9 H15 M7.5 13.5 H15"/></g><g fill="currentColor"><circle cx="3.8" cy="4.5" r="1.3"/><circle cx="3.8" cy="9" r="1.3"/><circle cx="3.8" cy="13.5" r="1.3"/></g>',
   up: '<path d="M5 11 L9 7 L13 11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
@@ -3905,6 +3910,10 @@ function openContextMenu(x, y) {
       { label: "Bring to front", icon: "front", run: function () { reorder("front"); } },
       { label: "Send to back", icon: "back", run: function () { reorder("back"); } }
     ];
+    var only = selList();
+    if (only.length === 1) {
+      defs.push("-", { label: "Hide it during Play", icon: "eyeOff", run: function () { addHide(only[0].item.id, true); } });
+    }
     if (many) {
       defs.push("-",
         { label: "Align left", icon: "alnL", run: function () { alignSelected("left"); } },
@@ -3999,19 +4008,59 @@ var revealTimers = [];
 function revealSteps() {
   var auto = revealOrder();
   var custom = page().reveal;
-  if (!custom) return { start: [], steps: auto.map(function (k) { return [k]; }), custom: false };
-  var live = new Set(auto), seen = new Set();
-  function keep(list) {
-    return (list || []).filter(function (k) {
-      if (!live.has(k) || seen.has(k)) return false;
-      seen.add(k);
-      return true;
+  if (!custom) return { start: [], steps: auto.map(function (k) { return [{ id: k, hide: false }]; }), custom: false };
+  /* Steps hold entries: a plain id appears, { id, hide: true } disappears.
+     Each item appears once and hides at most once, and only after it has
+     appeared; anything that breaks that is dropped rather than played. */
+  var live = new Set(auto), seen = new Set(), shownAt = {};
+  var start = (custom.start || []).filter(function (k) {
+    if (!live.has(k) || seen.has(k)) return false;
+    seen.add(k); shownAt[k] = -1;
+    return true;
+  });
+  var steps = [];
+  custom.steps.forEach(function (raw) {
+    var index = steps.length, kept = [];
+    (raw || []).forEach(function (e) {
+      var entry = typeof e === "string" ? { id: e, hide: false } : { id: e && e.id, hide: !!(e && e.hide) };
+      var key = entryKey(entry);
+      if (!live.has(entry.id) || seen.has(key)) return;
+      if (entry.hide && !(shownAt[entry.id] < index)) return;
+      seen.add(key);
+      if (!entry.hide) shownAt[entry.id] = index;
+      kept.push(entry);
     });
-  }
-  var start = keep(custom.start);
-  var steps = custom.steps.map(keep).filter(function (st) { return st.length; });
-  auto.forEach(function (k) { if (!seen.has(k)) steps.push([k]); });
+    if (kept.length) steps.push(kept);
+  });
+  auto.forEach(function (k) { if (!seen.has(k)) steps.push([{ id: k, hide: false }]); });
   return { start: start, steps: steps, custom: true };
+}
+function entryKey(e) { return e.hide ? e.id + "#hide" : e.id; }
+function stepIds(st) { return st.map(function (e) { return e.id; }); }
+
+/* Stores a reveal after checking that every hide comes in a later step
+   than its item's appearance. Returns false (and says why) if not. */
+function saveReveal(start, steps) {
+  steps = steps.filter(function (st) { return st.length; });
+  var shownAt = {};
+  start.forEach(function (k) { shownAt[k] = -1; });
+  steps.forEach(function (st, i) { st.forEach(function (e) { if (!e.hide) shownAt[e.id] = i; }); });
+  for (var i = 0; i < steps.length; i++) {
+    for (var j = 0; j < steps[i].length; j++) {
+      var e = steps[i][j];
+      if (e.hide && !(shownAt[e.id] < i)) {
+        toast("“" + itemName(e.id).label + "” has to appear before it can hide");
+        render();
+        return false;
+      }
+    }
+  }
+  page().reveal = {
+    start: start.slice(),
+    steps: steps.map(function (st) { return st.map(function (e) { return e.hide ? { id: e.id, hide: true } : e.id; }); })
+  };
+  commit(); render();
+  return true;
 }
 
 function revealOrder() {
@@ -4048,8 +4097,13 @@ function setPlayButton() {
   $("playIcon").appendChild(icon(playing ? "stop" : "play", 13));
   $("playLabel").textContent = playing ? "Stop" : "Play";
 }
+/* After a reveal with hides finishes, the sheet holds its last frame
+   until the next click, then everything comes back for editing. */
+var revealHolding = false;
 function stopReveal() {
+  if (revealHolding && !revealTimers.length) { revealHolding = false; showEverything(); setHint("Back to editing."); return; }
   if (!revealTimers.length) return;
+  revealHolding = false;
   revealTimers.forEach(clearTimeout);
   revealTimers = [];
   hitsGroup.style.display = "";
@@ -4066,24 +4120,28 @@ function playReveal() {
   sel.clear();
   closeEditor(true);
   render();
+  showEverything();
+  revealHolding = false;
 
   var plan = revealSteps();
   if (!plan.steps.length) { setHint("Everything is set to show from the start, so there is nothing to reveal."); return; }
   var step = parseInt($("speed").value, 10);
-  plan.steps.forEach(function (keys) { keys.forEach(function (key) { setKeyOpacity(key, "0"); }); });
+  plan.steps.forEach(function (st) { st.forEach(function (e) { if (!e.hide) setKeyOpacity(e.id, "0"); }); });
+  var anyHides = plan.steps.some(function (st) { return st.some(function (e) { return e.hide; }); });
   hitsGroup.style.display = "none";
   setHint("Playing. Press Play again or click the sheet to stop.");
 
-  plan.steps.forEach(function (keys, index) {
+  plan.steps.forEach(function (st, index) {
     revealTimers.push(setTimeout(function () {
-      keys.forEach(function (key) { setKeyOpacity(key, "1"); });
+      st.forEach(function (e) { setKeyOpacity(e.id, e.hide ? "0" : "1"); });
       markPlayingStep(index);
       if (index === plan.steps.length - 1) {
         revealTimers = [];
         hitsGroup.style.display = "";
         setPlayButton();
         markPlayingStep(-1);
-        setHint("Reveal finished.");
+        revealHolding = anyHides;
+        setHint(anyHides ? "Reveal finished. Click the sheet to bring back what was hidden." : "Reveal finished.");
       }
     }, index * step));
   });
@@ -4097,7 +4155,7 @@ function playReveal() {
         The arrows on each step do the same for anyone not dragging.
    ================================================================ */
 var orderPanel = $("orderPanel"), orderBody = $("orderBody");
-var orderDrag = null;     /* ids being dragged in the panel */
+var orderDrag = null;     /* entries ({ id, hide }) being dragged in the panel */
 var orderHover = [];      /* ids outlined on the sheet while a step is hovered */
 
 function itemName(id) {
@@ -4125,49 +4183,77 @@ function shortName(node) {
   return (node.title || "").split("\n")[0] || (node.type === "image" ? "image" : node.type);
 }
 
-/* Moves ids to the start zone, into a step, or into the gap before step
-   `index` (an index past the end makes a new last step). Taking the ids
+/* Moves entries to the start zone, into a step, or into the gap before
+   step `index` (an index past the end makes a new last step). Taking them
    out first keeps every step in place, so the indexes still line up. */
-function moveReveal(ids, target) {
-  var r = revealSteps(), gone = new Set(ids);
-  function strip(list) { return list.filter(function (k) { return !gone.has(k); }); }
-  var start = strip(r.start), steps = r.steps.map(strip);
-  if (target.kind === "start") start = start.concat(ids);
-  else if (target.kind === "step") steps[target.index] = steps[target.index].concat(ids);
-  else steps.splice(target.index, 0, ids.slice());
-  page().reveal = { start: start, steps: steps.filter(function (st) { return st.length; }) };
-  commit(); render();
+function moveReveal(entries, target) {
+  var r = revealSteps(), gone = new Set(entries.map(entryKey));
+  if (target.kind === "start" && entries.some(function (e) { return e.hide; })) {
+    toast("Hiding happens during Play, so it cannot go in “Showing from the start”");
+    render();
+    return;
+  }
+  var start = r.start.filter(function (k) { return !gone.has(k); });
+  var steps = r.steps.map(function (st) { return st.filter(function (e) { return !gone.has(entryKey(e)); }); });
+  if (target.kind === "start") start = start.concat(entries.map(function (e) { return e.id; }));
+  else if (target.kind === "step") steps[target.index] = steps[target.index].concat(entries);
+  else steps.splice(target.index, 0, entries.slice());
+  saveReveal(start, steps);
 }
 function moveStep(index, by) {
   var r = revealSteps(), to = index + by;
   if (to < 0 || to >= r.steps.length) return;
   var moving = r.steps.splice(index, 1)[0];
   r.steps.splice(to, 0, moving);
-  page().reveal = { start: r.start, steps: r.steps };
-  commit(); render();
+  saveReveal(r.start, r.steps);
 }
 function splitStep(index) {
-  var r = revealSteps(), parts = r.steps[index].map(function (k) { return [k]; });
+  var r = revealSteps(), parts = r.steps[index].map(function (e) { return [e]; });
   r.steps.splice.apply(r.steps, [index, 1].concat(parts));
-  page().reveal = { start: r.start, steps: r.steps };
-  commit(); render();
+  saveReveal(r.start, r.steps);
+}
+/* A hide goes in its own step right after the item appears (or at the
+   very end), ready to be dragged in with whatever it should go with. */
+function addHide(id, atEnd) {
+  var r = revealSteps();
+  if (r.steps.some(function (st) { return st.some(function (e) { return e.id === id && e.hide; }); })) {
+    toast("It already has a hide step");
+    return;
+  }
+  var shown = -1;
+  r.steps.forEach(function (st, i) { if (st.some(function (e) { return e.id === id && !e.hide; })) shown = i; });
+  if (shown < 0 && r.start.indexOf(id) < 0) return;
+  r.steps.splice(atEnd ? r.steps.length : shown + 1, 0, [{ id: id, hide: true }]);
+  if (saveReveal(r.start, r.steps)) toast("Added a step that hides it. Drag it to the moment it should go.");
+}
+function removeHide(id) {
+  var r = revealSteps();
+  saveReveal(r.start, r.steps.map(function (st) { return st.filter(function (e) { return !(e.id === id && e.hide); }); }));
 }
 
-function orderChip(id) {
-  var info = itemName(id);
+function orderChip(entry, hasHide) {
+  var info = itemName(entry.id);
+  var row = htmlEl("div", "chip-row" + (entry.hide ? " hides" : ""));
   var chip = htmlEl("button", "chip" + (info.dim ? " dim" : ""));
   chip.type = "button";
   chip.draggable = true;
-  chip.appendChild(icon(info.icon, 14));
+  chip.appendChild(icon(entry.hide ? "eyeOff" : info.icon, 14));
+  if (entry.hide) chip.appendChild(htmlEl("b", "chip-tag", "Hide"));
   chip.appendChild(htmlEl("span", null, info.label));
-  chip.dataset.tip = "Drag to another step";
-  chip.addEventListener("click", function (e) { e.stopPropagation(); selectOnly(id); });
-  chip.addEventListener("dragstart", function (e) { startOrderDrag(e, [id], chip); e.stopPropagation(); });
+  chip.dataset.tip = entry.hide ? "Disappears here. Drag to another step" : "Drag to another step";
+  chip.addEventListener("click", function (e) { e.stopPropagation(); selectOnly(entry.id); });
+  chip.addEventListener("dragstart", function (e) { startOrderDrag(e, [entry], row); e.stopPropagation(); });
   chip.addEventListener("dragend", endOrderDrag);
-  return chip;
+  row.appendChild(chip);
+  if (entry.hide) {
+    row.appendChild(toolButton({ icon: "close", title: "Remove this hide", size: 12, onClick: function (e) { e.stopPropagation(); removeHide(entry.id); } }));
+  } else if (!hasHide) {
+    row.appendChild(toolButton({ icon: "eyeOff", title: "Hide it later in the reveal", size: 13, onClick: function (e) { e.stopPropagation(); addHide(entry.id); } }));
+  }
+  return row;
 }
-function startOrderDrag(e, ids, el) {
-  orderDrag = ids;
+function startOrderDrag(e, entries, el) {
+  orderDrag = entries;
   e.dataTransfer.effectAllowed = "move";
   e.dataTransfer.setData("text/plain", "reveal");
   el.classList.add("dragging");
@@ -4187,9 +4273,9 @@ function dropTarget(el, target) {
   el.addEventListener("drop", function (e) {
     if (!orderDrag) return;
     e.preventDefault(); e.stopPropagation();
-    var ids = orderDrag;
+    var entries = orderDrag;
     endOrderDrag();
-    moveReveal(ids, target);
+    moveReveal(entries, target);
   });
 }
 function hoverIds(ids) { orderHover = ids; drawOverlay(); }
@@ -4201,17 +4287,20 @@ function renderOrderPanel() {
   $("orderReset").disabled = !r.custom;
 
   orderBody.appendChild(htmlEl("p", "order-note",
-    "Drag to change what appears when. Drop onto a step to show things together, or between steps to give them their own."));
+    "Drag to change when things appear or hide. Everything in one step happens at the same moment. Use the eye on an item to make it hide later."));
+  var hidden = new Set();
+  r.steps.forEach(function (st) { st.forEach(function (e) { if (e.hide) hidden.add(e.id); }); });
 
   orderBody.appendChild(htmlEl("div", "order-label", "Showing from the start"));
   var zone = htmlEl("div", "start-zone");
-  if (r.start.length) r.start.forEach(function (id) { zone.appendChild(orderChip(id)); });
+  if (r.start.length) r.start.forEach(function (id) { zone.appendChild(orderChip({ id: id, hide: false }, hidden.has(id))); });
   else zone.appendChild(htmlEl("div", "empty", "Drop things here to have them on the sheet before Play begins."));
   dropTarget(zone, { kind: "start" });
   orderBody.appendChild(zone);
 
   orderBody.appendChild(htmlEl("div", "order-label", r.steps.length ? "Then, one step at a time" : "No steps yet"));
-  r.steps.forEach(function (ids, index) {
+  r.steps.forEach(function (entries, index) {
+    var ids = stepIds(entries);
     var gap = htmlEl("div", "gap");
     dropTarget(gap, { kind: "gap", index: index });
     orderBody.appendChild(gap);
@@ -4222,21 +4311,28 @@ function renderOrderPanel() {
     var num = htmlEl("span", "step-num", String(index + 1));
     num.draggable = true;
     num.dataset.tip = "Drag to move this step";
-    num.addEventListener("dragstart", function (e) { startOrderDrag(e, ids.slice(), card); });
+    num.addEventListener("dragstart", function (e) { startOrderDrag(e, entries.slice(), card); });
     num.addEventListener("dragend", endOrderDrag);
     card.appendChild(num);
 
     var list = htmlEl("div", "step-items");
-    ids.forEach(function (id) { list.appendChild(orderChip(id)); });
+    entries.forEach(function (e) { list.appendChild(orderChip(e, hidden.has(e.id))); });
     card.appendChild(list);
 
-    var tools = htmlEl("div", "step-tools");
-    tools.appendChild(toolButton({ icon: "up", title: "Earlier", size: 14, disabled: index === 0, onClick: function () { moveStep(index, -1); } }));
-    tools.appendChild(toolButton({ icon: "down", title: "Later", size: 14, disabled: index === r.steps.length - 1, onClick: function () { moveStep(index, 1); } }));
-    if (ids.length > 1) {
-      tools.appendChild(toolButton({ icon: "distV", title: "Split into separate steps", size: 14, onClick: function () { splitStep(index); } }));
+    function stepMenu(x, y) {
+      openMenuAt(x, y, [
+        { label: "Move earlier", icon: "up", disabled: index === 0, run: function () { moveStep(index, -1); } },
+        { label: "Move later", icon: "down", disabled: index === r.steps.length - 1, run: function () { moveStep(index, 1); } },
+        { label: "Split into separate steps", icon: "distV", disabled: entries.length < 2, run: function () { splitStep(index); } }
+      ]);
     }
+    var tools = htmlEl("div", "step-tools");
+    tools.appendChild(toolButton({
+      icon: "more", title: "Move or split this step", size: 14,
+      onClick: function (e, b) { e.stopPropagation(); var rc = b.getBoundingClientRect(); stepMenu(rc.left, rc.bottom + 4); }
+    }));
     card.appendChild(tools);
+    card.addEventListener("contextmenu", function (e) { e.preventDefault(); stepMenu(e.clientX, e.clientY); });
 
     card.addEventListener("mouseenter", function () { hoverIds(ids); });
     card.addEventListener("mouseleave", function () { hoverIds([]); });
@@ -4254,7 +4350,7 @@ function markPickedSteps() {
   if (orderPanel.hidden) return;
   var r = revealSteps();
   Array.prototype.forEach.call(orderBody.querySelectorAll(".step"), function (card) {
-    var ids = r.steps[+card.dataset.step] || [];
+    var ids = stepIds(r.steps[+card.dataset.step] || []);
     card.classList.toggle("picked", ids.some(function (id) { return sel.has(id); }));
   });
 }
@@ -4524,10 +4620,10 @@ function rasterize(svg, w, h, done, fail) {
    edges). The last frame holds so the finished sheet can be read. */
 function gifPlan(opts) {
   var steps = revealSteps().steps;
-  if (!opts.animated || !steps.length) return { steps: steps, frames: [{ visible: Infinity, partial: 0, delay: 0 }] };
+  if (!opts.animated || !steps.length) return { steps: steps, frames: [{ all: true, delay: 0 }] };
   var step = parseInt($("speed").value, 10) || 700;
   var frames = [{ visible: 0, partial: 0, delay: 500 }];
-  steps.forEach(function (keys, i) {
+  steps.forEach(function (st, i) {
     if (opts.background) {
       frames.push({ visible: i, partial: 1 / 3, delay: 70 }, { visible: i, partial: 2 / 3, delay: 70 });
       frames.push({ visible: i + 1, partial: 0, delay: Math.max(60, step - 140) });
@@ -4542,22 +4638,32 @@ function exportGif(opts, onProgress, onDone, onFail) {
   stopReveal();
   sel.clear(); closeEditor(true); render();
   var box = exportBox(), w = Math.round(box.w * opts.scale), h = Math.round(box.h * opts.scale);
-  var plan = gifPlan(opts), order = {};
-  plan.steps.forEach(function (keys, i) { keys.forEach(function (k) { order[k] = i; }); });
+  var plan = gifPlan(opts), timeline = {};
+  plan.steps.forEach(function (st, i) {
+    st.forEach(function (e) {
+      var t = timeline[e.id] || (timeline[e.id] = { show: -1, hide: null });
+      if (e.hide) t.hide = i; else t.show = i;
+    });
+  });
   var job = { cancelled: false };
 
   function svgFor(f) {
     return buildSvgString(true, {
       box: box,
       transparent: !opts.background,
+      /* how far each step has got at this frame: done, fading, or not yet */
       opacityOf: function (key) {
-        var i = order[key];
-        if (i === undefined) return 1;
-        return i < f.visible ? 1 : i === f.visible ? f.partial : 0;
+        var t = timeline[key];
+        if (!t || f.all) return 1;
+        function reached(i) { return i < f.visible ? 1 : i === f.visible ? f.partial : 0; }
+        var shown = t.show < 0 ? 1 : reached(t.show);
+        var gone = t.hide === null ? 0 : reached(t.hide);
+        return Math.max(0, shown - gone);
       }
     });
   }
-  rasterize(svgFor({ visible: Infinity, partial: 0 }), w, h, function (finished) {
+  /* the palette comes from the sheet with everything showing, hidden things included */
+  rasterize(svgFor({ all: true }), w, h, function (finished) {
     var palette = gifPalette(gifHistogram(finished, !opts.background), 255);
     var toIndices = gifMapper(palette, !opts.background);
     var frames = [], prev = null, i = 0;
