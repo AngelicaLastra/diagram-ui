@@ -3532,7 +3532,10 @@ function formatToggles(getItems) {
       var on = list.length && list.every(function (i) { return !!i[f[0]]; });
       wrap.appendChild(toolButton({
         label: f[1], labelClass: f[2], title: f[3], pressed: on,
-        onClick: function () { patchSelected({ [f[0]]: function (it) { return !on; } }); }
+        onClick: function () {
+          var targets = new Set(getItems());
+          patchSelected({ [f[0]]: function (it) { return targets.has(it) ? !on : undefined; } });
+        }
       }));
     });
   return wrap;
@@ -3541,26 +3544,85 @@ function formatToggles(getItems) {
 /* ================================================================
    19. Floating property bar
    ================================================================ */
-function buildNodeBubble(node) {
+/* Shapes are the boxes, diamonds, ellipses, pills, notes and tables:
+   the things with a fill, an outline and a title. */
+function isShape(node) { return node.type !== "image" && node.type !== "ink"; }
+function selectedShapes() { return selNodes().filter(isShape); }
+/* Wraps a patch so it only lands on selected shapes. */
+function onlyShapes(patch) {
+  var out = {};
+  Object.keys(patch).forEach(function (key) {
+    var v = patch[key];
+    out[key] = function (it, kind) {
+      if (kind !== "node" || !isShape(it)) return undefined;
+      return typeof v === "function" ? v(it, kind) : v;
+    };
+  });
+  return out;
+}
+function allOf(list, test) { return list.length > 0 && list.every(test); }
+
+/* The look of one or many shapes; the controls show the first shape's
+   values and change every selected shape. */
+function buildShapeLook(shapes) {
+  var first = shapes[0];
   bubble.appendChild(toolButton({
-    icon: "box", title: "Soft wash", pressed: node.style === "wash",
-    onClick: function () { patchSelected({ style: "wash" }); }
+    icon: "box", title: "Soft wash", pressed: allOf(shapes, function (n) { return n.style === "wash"; }),
+    onClick: function () { patchSelected(onlyShapes({ style: "wash" })); }
   }));
   bubble.appendChild(toolButton({
-    icon: "sketch", title: "Inked and hatched", pressed: node.style === "sketch",
-    onClick: function () { patchSelected({ style: "sketch" }); }
+    icon: "sketch", title: "Inked and hatched", pressed: allOf(shapes, function (n) { return n.style === "sketch"; }),
+    onClick: function () { patchSelected(onlyShapes({ style: "sketch" })); }
   }));
   bubble.appendChild(toolButton({
-    label: node.filled ? "Filled" : "Outline", title: "Filled or open outline",
-    onClick: function () { patchSelected({ filled: function (it) { return !it.filled; } }); }
+    label: first.filled ? "Filled" : "Outline", title: "Filled or open outline",
+    onClick: function () { patchSelected(onlyShapes({ filled: !first.filled })); }
   }));
   bubble.appendChild(divider());
 
-  bubble.appendChild(paletteRow(node.fill, function (preset) {
-    patchSelected({ fill: preset.fill, accent: preset.accent });
+  bubble.appendChild(paletteRow(allOf(shapes, function (n) { return n.fill === first.fill; }) ? first.fill : null, function (preset) {
+    patchSelected(onlyShapes({ fill: preset.fill, accent: preset.accent }));
   }));
-  bubble.appendChild(colorControl(node.fill, "Fill colour", function (hex) { patchSelected({ fill: hex }); }));
-  bubble.appendChild(colorControl(node.accent, "Ink colour", function (hex) { patchSelected({ accent: hex }); }));
+  bubble.appendChild(colorControl(first.fill, "Fill colour", function (hex) { patchSelected(onlyShapes({ fill: hex })); }));
+  bubble.appendChild(colorControl(first.accent, "Ink colour", function (hex) { patchSelected(onlyShapes({ accent: hex })); }));
+}
+function shapeTypeControl(shapes) {
+  bubble.appendChild(selectControl([
+    ["box", "Box"], ["diamond", "Diamond"], ["ellipse", "Ellipse"], ["pill", "Pill"], ["note", "Note"]
+  ], shapes[0].type, "Shape", function (v) {
+    patchSelected(onlyShapes({ type: function (it) { return it.type === "table" ? undefined : v; } }));
+  }));
+}
+/* Font controls for anything with words: shape titles, text items and
+   arrow labels each keep their size and colour in their own fields. */
+function textFields(it) {
+  if (it.text !== undefined && it.anchor !== undefined) return { size: "size", color: "color", base: 15 };
+  if (it.from !== undefined) return { size: "labelSize", color: "labelColor", base: 9.5 };
+  return { size: "titleSize", color: "titleColor", base: 11.5 };
+}
+function buildTextLook(items) {
+  var first = items[0], ff = textFields(first);
+  var targets = new Set(items);
+  bubble.appendChild(formatToggles(function () { return items; }));
+  bubble.appendChild(numberControl(first[ff.size] || ff.base, 5, 96, items.length > 1 ? "Text size (all selected)" : "Text size",
+    function (v) {
+      patchSelected({
+        titleSize: function (it) { return targets.has(it) && textFields(it).size === "titleSize" ? v : undefined; },
+        size: function (it) { return targets.has(it) && textFields(it).size === "size" ? v : undefined; },
+        labelSize: function (it) { return targets.has(it) && textFields(it).size === "labelSize" ? v : undefined; }
+      });
+    }, 0.5));
+  bubble.appendChild(colorControl(first[ff.color] || first.color || INK, "Text colour", function (hex) {
+    patchSelected({
+      titleColor: function (it) { return targets.has(it) && textFields(it).color === "titleColor" ? hex : undefined; },
+      color: function (it) { return targets.has(it) && textFields(it).color === "color" ? hex : undefined; },
+      labelColor: function (it) { return targets.has(it) && textFields(it).color === "labelColor" ? hex : undefined; }
+    });
+  }));
+}
+
+function buildNodeBubble(node) {
+  buildShapeLook([node]);
   bubble.appendChild(divider());
 
   if (node.type === "table") {
@@ -3598,126 +3660,60 @@ function buildNodeBubble(node) {
       onClick: function () { patchSelected({ header: function (it) { return it.type === "table" ? !it.header : undefined; } }); }
     }));
   } else {
-    bubble.appendChild(selectControl([
-      ["box", "Box"], ["diamond", "Diamond"], ["ellipse", "Ellipse"], ["pill", "Pill"], ["note", "Note"]
-    ], node.type, "Shape", function (v) { patchSelected({ type: v }); }));
+    shapeTypeControl([node]);
   }
   bubble.appendChild(divider());
-
-  bubble.appendChild(formatToggles(function () { return selNodes(); }));
-  bubble.appendChild(numberControl(node.titleSize || 11.5, 6, 60, "Text size",
-    function (v) { patchSelected({ titleSize: v }); }, 0.5));
-  bubble.appendChild(colorControl(node.titleColor || INK, "Text colour",
-    function (hex) { patchSelected({ titleColor: hex }); }));
+  buildTextLook([node]);
 }
-
-function buildEdgeBubble(edge) {
-  [["curve", "routeCurve", "Curved"], ["elbow", "routeElbow", "Right angles"], ["straight", "routeStraight", "Straight"]]
-    .forEach(function (r) {
-      bubble.appendChild(toolButton({
-        icon: r[1], title: r[2], pressed: edge.shape === r[0],
-        onClick: function () { patchSelected({ shape: r[0] }); }
-      }));
-    });
-  bubble.appendChild(divider());
-
-  bubble.appendChild(toolButton({
-    icon: edge.dashed ? "dashed" : "solid", title: "Solid or dashed",
-    onClick: function () { patchSelected({ dashed: function (it) { return !it.dashed; } }); }
-  }));
-  bubble.appendChild(colorControl(edge.color || LINE, "Line colour", function (hex) { patchSelected({ color: hex }); }));
-  bubble.appendChild(numberControl(edge.weight || 1.6, 0.5, 8, "Line width",
-    function (v) { patchSelected({ weight: v }); }, 0.1));
-
-  if (edge.shape === "curve") {
-    bubble.appendChild(numberControl(Math.round(edge.pull || 60), 0, 400, "How far it bows",
-      function (v) { patchSelected({ pull: v, o1: undefined, o2: undefined }); }));
-    bubble.appendChild(toolButton({
-      label: "Reset bend", title: "Put the curve back to its default",
-      onClick: function () {
-        selList().filter(function (f) { return f.kind === "edge"; }).forEach(function (f) {
-          delete f.item.o1; delete f.item.o2; delete f.item.pull;
-        });
-        commit(); render();
-      }
-    }));
-  } else if (edge.shape === "elbow") {
-    bubble.appendChild(numberControl(edge.detour || 0, -600, 600, "Detour",
-      function (v) { patchSelected({ detour: v }); }));
-  }
-  bubble.appendChild(divider());
-
-  bubble.appendChild(selectControl(SIDES.concat(["auto"]).map(function (s) { return [s, s]; }),
-    edge.fromSide || "auto", "Leaves from", function (v) { patchSelected({ fromSide: v }); }));
-  bubble.appendChild(selectControl(SIDES.concat(["auto"]).map(function (s) { return [s, s]; }),
-    edge.toSide || "auto", "Arrives at", function (v) { patchSelected({ toSide: v }); }));
-  bubble.appendChild(toolButton({
-    label: "Flip", title: "Turn the arrow around",
-    onClick: function () {
-      selList().filter(function (f) { return f.kind === "edge"; }).forEach(function (f) {
-        var e = f.item;
-        var a = e.from, as = e.fromSide;
-        e.from = e.to; e.fromSide = e.toSide;
-        e.to = a; e.toSide = as;
-        delete e.o1; delete e.o2;
-      });
-      commit(); render();
-    }
-  }));
-  bubble.appendChild(divider());
-
-  if (edge.label) {
-    bubble.appendChild(toolButton({
-      icon: edge.onPath ? "labelPath" : "labelFlat",
-      title: edge.onPath ? "Label rides the line" : "Label sits flat",
-      onClick: function () { patchSelected({ onPath: function (it) { return !it.onPath; } }); }
-    }));
-    bubble.appendChild(numberControl(edge.labelSize || 9.5, 5, 40, "Label size",
-      function (v) { patchSelected({ labelSize: v }); }, 0.5));
-  } else {
-    bubble.appendChild(toolButton({
-      label: "Add label", title: "Put a word on this arrow",
-      onClick: function () { openEditor(edge.id, "label"); }
-    }));
-  }
-}
-
-function buildTextBubble(item) {
-  bubble.appendChild(numberControl(item.size, 6, 96, "Font size",
-    function (v) { patchSelected({ size: v }); }, 0.5));
-  bubble.appendChild(colorControl(item.color, "Text colour", function (hex) { patchSelected({ color: hex }); }));
-  bubble.appendChild(divider());
-  bubble.appendChild(formatToggles(function () {
-    return selList().filter(function (f) { return f.kind === "text"; }).map(function (f) { return f.item; });
-  }));
-  bubble.appendChild(divider());
-  [["start", "alignLeft", "Left"], ["middle", "alignCenter", "Centre"], ["end", "alignRight", "Right"]]
-    .forEach(function (a) {
-      bubble.appendChild(toolButton({
-        icon: a[1], title: a[2], pressed: item.anchor === a[0],
-        onClick: function () { patchSelected({ anchor: a[0] }); }
-      }));
-    });
-}
-
+/* Several things selected: the same look and font controls as a single
+   shape, applied to everything they fit, with alignment folded into one
+   menu so the bar stays a sensible length. */
 function buildMultiBubble() {
   bubble.appendChild(htmlEl("span", null, sel.size + " selected"));
   bubble.appendChild(divider());
-  [["left", "alnL", "Align left"], ["hcenter", "alnCH", "Centre across"], ["right", "alnR", "Align right"],
-   ["top", "alnT", "Align top"], ["vcenter", "alnCV", "Centre down"], ["bottom", "alnB", "Align bottom"]]
-    .forEach(function (a) {
-      bubble.appendChild(toolButton({ icon: a[1], title: a[2], onClick: function () { alignSelected(a[0]); } }));
-    });
-  bubble.appendChild(toolButton({ icon: "distH", title: "Spread across", onClick: function () { distributeSelected("h"); } }));
-  bubble.appendChild(toolButton({ icon: "distV", title: "Spread down", onClick: function () { distributeSelected("v"); } }));
+  var align = toolButton({
+    icon: "alnL", label: "Align", title: "Line up or spread out the selection",
+    onClick: function (e, b) {
+      var rc = b.getBoundingClientRect();
+      openMenuAt(rc.left, rc.bottom + 6, [
+        { label: "Align left", icon: "alnL", run: function () { alignSelected("left"); } },
+        { label: "Centre across", icon: "alnCH", run: function () { alignSelected("hcenter"); } },
+        { label: "Align right", icon: "alnR", run: function () { alignSelected("right"); } },
+        "-",
+        { label: "Align top", icon: "alnT", run: function () { alignSelected("top"); } },
+        { label: "Centre down", icon: "alnCV", run: function () { alignSelected("vcenter"); } },
+        { label: "Align bottom", icon: "alnB", run: function () { alignSelected("bottom"); } },
+        "-",
+        { label: "Spread across", icon: "distH", run: function () { distributeSelected("h"); } },
+        { label: "Spread down", icon: "distV", run: function () { distributeSelected("v"); } }
+      ]);
+    }
+  });
+  bubble.appendChild(align);
   bubble.appendChild(divider());
-  bubble.appendChild(paletteRow(null, function (preset) {
-    patchSelected({
-      fill: function (it, kind) { return kind === "node" ? preset.fill : undefined; },
-      accent: function (it, kind) { return kind === "node" ? preset.accent : undefined; },
-      color: function (it, kind) { return kind === "edge" ? preset.accent : undefined; }
-    });
-  }));
+
+  var shapes = selectedShapes();
+  if (shapes.length) {
+    buildShapeLook(shapes);
+    if (shapes.every(function (n) { return n.type !== "table"; })) {
+      bubble.appendChild(divider());
+      shapeTypeControl(shapes);
+    }
+  } else {
+    bubble.appendChild(paletteRow(null, function (preset) {
+      patchSelected({
+        accent: function (it, kind) { return kind === "node" ? preset.accent : undefined; },
+        color: function (it, kind) { return kind === "edge" ? preset.accent : undefined; }
+      });
+    }));
+  }
+  var worded = selList().filter(function (f) {
+    return f.kind === "text" || f.kind === "edge" || (f.kind === "node" && isShape(f.item));
+  }).map(function (f) { return f.item; });
+  if (worded.length) {
+    bubble.appendChild(divider());
+    buildTextLook(worded);
+  }
 }
 
 function placeBubble() {
