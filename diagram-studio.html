@@ -619,6 +619,10 @@ function newPage(name) {
 }
 
 var doc = { title: "Untitled sketch", pages: [newPage("Sheet 1")], active: 0 };
+/* Imported pictures, keyed by id. Image nodes point here instead of
+   carrying the data themselves, so undo snapshots stay small. Nothing is
+   removed while the page is open, which keeps undo safe. */
+var assets = {};
 var sel = new Set();
 var tool = "select";
 var connectFrom = null;
@@ -688,11 +692,33 @@ function refreshHistory() {
 
 var persistTimer = null;
 function schedulePersist() { clearTimeout(persistTimer); persistTimer = setTimeout(persistNow, 600); }
+function usedAssets() {
+  var out = {};
+  doc.pages.forEach(function (p) {
+    p.nodes.forEach(function (n) { if (n.asset && assets[n.asset]) out[n.asset] = assets[n.asset]; });
+  });
+  return out;
+}
+var assetSig = null;
+function persistAssets() {
+  var used = usedAssets(), sig = Object.keys(used).sort().join(",");
+  if (sig === assetSig) return true;
+  try {
+    localStorage.setItem(STORE + ":assets", JSON.stringify(used));
+    assetSig = sig;
+    return true;
+  } catch (err) {
+    toast("The images are too big to keep in this browser. Use File, Save a copy to keep them.");
+    return false;
+  }
+}
 function persistNow() {
   try {
+    var picturesKept = persistAssets();
     localStorage.setItem(STORE, stateJSON());
     localStorage.setItem(STORE + ":prefs", JSON.stringify({ roughness: roughness, textureOn: textureOn, snapOn: snapOn, gridOn: gridOn, guidesOn: guidesOn }));
-    $("saved").textContent = "Saved " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    $("saved").textContent = (picturesKept ? "Saved " : "Saved without images ") +
+      new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   } catch (err) { $("saved").textContent = "Not saved locally"; }
 }
 function loadPersisted() {
@@ -705,6 +731,7 @@ function loadPersisted() {
       gridOn = prefs.gridOn !== false;
       guidesOn = prefs.guidesOn !== false;
     }
+    assets = JSON.parse(localStorage.getItem(STORE + ":assets") || "{}") || {};
     var raw = localStorage.getItem(STORE);
     if (!raw) return false;
     var o = JSON.parse(raw);
@@ -1229,7 +1256,45 @@ function drawSketchBody(node, shapeGroup, corners, jitter, random) {
   }
 }
 
+/* Pictures are drawn as they are. The paper filter would smear them, so
+   it only goes on when "Sketchy" is switched on, and the frame is an
+   optional hand-ruled border in the ink colour. */
+function drawImageNode(node) {
+  var shapeGroup = keyedGroup("shapes", node.id, !!node.wobble);
+  keyedGroup("labels", node.id, false);
+  var src = assets[node.asset];
+  if (src) {
+    var pic = makeEl("image", {
+      x: node.x, y: node.y, width: node.w, height: node.h, preserveAspectRatio: "none"
+    });
+    pic.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", src);
+    shapeGroup.appendChild(pic);
+  } else {
+    shapeGroup.appendChild(makeEl("rect", {
+      x: node.x, y: node.y, width: node.w, height: node.h, rx: 4,
+      fill: "#F5F2EA", stroke: LINE, "stroke-dasharray": "6 5"
+    }));
+    var missing = styledText(node.x + node.w / 2, node.y + node.h / 2 + 4, "Image missing", { size: 11, color: INK_SOFT, anchor: "middle" });
+    shapeGroup.appendChild(missing);
+  }
+  if (node.frame) {
+    var random = makeRandom(hashOf(node.id));
+    var pad = 5;
+    var corners = cornersFor({ x: node.x - pad, y: node.y - pad, w: node.w + pad * 2, h: node.h + pad * 2 });
+    corners.forEach(function (c, i) {
+      shapeGroup.appendChild(makeEl("path", {
+        d: sidePath(c, corners[(i + 1) % 4], ROUGHNESS[roughness].jitter * 0.6, random),
+        fill: "none", stroke: node.accent, "stroke-width": (2 + random() * 0.8).toFixed(2),
+        "stroke-opacity": 0.9, "stroke-linecap": "round"
+      }));
+    });
+  }
+  var hit = keyedHit(node.id, "rect", "nodeId");
+  setAttrs(hit, { x: node.x, y: node.y, width: node.w, height: node.h, fill: "transparent", cursor: "move" });
+}
+
 function drawNode(node) {
+  if (node.type === "image") { drawImageNode(node); return; }
   var shapeGroup = keyedGroup("shapes", node.id, true);
   var labelGroup = keyedGroup("labels", node.id, false);
   var mid = center(node);
@@ -1801,6 +1866,141 @@ function makeEdge(fromId, fromSide, toId, toSide) {
 }
 
 /* ================================================================
+   13b. Pictures
+        Files come in as data URLs so the sketch stays one file. Big
+        photos are scaled down first; local storage only holds a few MB.
+   ================================================================ */
+var MAX_IMAGE_SIDE = 1600;
+var imageInput = document.createElement("input");
+imageInput.type = "file";
+imageInput.accept = "image/png,image/jpeg,image/gif,image/webp,image/svg+xml,.svg";
+imageInput.multiple = true;
+imageInput.hidden = true;
+document.body.appendChild(imageInput);
+var imageTarget = null;   /* { at, replaceId } for the picker that is open */
+
+function isImageFile(f) { return /^image\//.test(f.type) || /\.svg$/i.test(f.name || ""); }
+function isSvgFile(f) { return f.type === "image/svg+xml" || /\.svg$/i.test(f.name || ""); }
+function viewCenter() { return { x: view.x + view.w / 2, y: view.y + view.h / 2 }; }
+
+function openImagePicker(at, replaceId) {
+  imageTarget = { at: at || viewCenter(), replaceId: replaceId || null };
+  imageInput.multiple = !replaceId;
+  imageInput.value = "";
+  imageInput.click();
+}
+imageInput.addEventListener("change", function () {
+  var files = Array.from(imageInput.files || []).filter(isImageFile);
+  var target = imageTarget || { at: viewCenter() };
+  imageTarget = null;
+  if (!files.length) return;
+  if (target.replaceId) replaceImage(target.replaceId, files[0]);
+  else importImages(files, target.at);
+});
+
+/* SVG files are read as text so they always get the right type, even
+   when the system reports none. They are only ever shown through an
+   <image> element, which never runs scripts inside them. */
+function svgDataUrl(text) { return "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(text))); }
+
+function readImage(file, done) {
+  var reader = new FileReader();
+  var svg = isSvgFile(file);
+  reader.onload = function () { measureImage(svg ? svgDataUrl(String(reader.result)) : String(reader.result), !svg, file.type, done); };
+  reader.onerror = function () { toast("Could not read " + (file.name || "that picture")); };
+  if (svg) reader.readAsText(file); else reader.readAsDataURL(file);
+}
+function measureImage(url, canShrink, type, done) {
+  var img = new Image();
+  img.onload = function () {
+    var w = img.naturalWidth || 300, h = img.naturalHeight || 200;
+    if (canShrink && Math.max(w, h) > MAX_IMAGE_SIDE) {
+      var k = MAX_IMAGE_SIDE / Math.max(w, h);
+      w = Math.round(w * k); h = Math.round(h * k);
+      var canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      url = canvas.toDataURL(type === "image/jpeg" ? "image/jpeg" : "image/png", 0.9);
+    }
+    done({ src: url, w: w, h: h });
+  };
+  img.onerror = function () { toast("That picture could not be opened"); };
+  img.src = url;
+}
+function storeAsset(src) {
+  var found = Object.keys(assets).filter(function (k) { return assets[k] === src; })[0];
+  if (found) return found;
+  var id = uid("img");
+  assets[id] = src;
+  return id;
+}
+/* Pictures land at a comfortable size, keeping their proportions. */
+function fitSize(w, h) {
+  var k = Math.min(1, 320 / w, 240 / h);
+  return { w: Math.max(24, Math.round(w * k)), h: Math.max(24, Math.round(h * k)) };
+}
+function placePicture(pic, at, offset) {
+  var size = fitSize(pic.w, pic.h);
+  var node = makeNode("box", "wash", at);
+  node.type = "image";
+  node.asset = storeAsset(pic.src);
+  node.natW = pic.w; node.natH = pic.h;
+  node.w = size.w; node.h = size.h;
+  node.x = Math.round(at.x - size.w / 2 + offset);
+  node.y = Math.round(at.y - size.h / 2 + offset);
+  node.frame = false; node.wobble = false;
+  nodes().push(node);
+  return node;
+}
+function importImages(files, at) {
+  var fresh = [], left = files.length;
+  files.forEach(function (file, i) {
+    readImage(file, function (pic) {
+      fresh.push(placePicture(pic, at, i * 24).id);
+      if (--left === 0) {
+        sel = new Set(fresh);
+        commit(); render();
+        setHint("Drag a corner to resize. Shift while resizing stretches it.");
+      }
+    });
+  });
+}
+function replaceImage(id, file) {
+  readImage(file, function (pic) {
+    var node = findNode(id);
+    if (!node) return;
+    node.asset = storeAsset(pic.src);
+    node.natW = pic.w; node.natH = pic.h;
+    node.h = Math.max(10, Math.round(node.w * pic.h / pic.w));
+    commit(); render();
+  });
+}
+
+document.addEventListener("paste", function (e) {
+  var tag = (e.target.tagName || "").toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || e.target.isContentEditable || !scrim.hidden) return;
+  var data = e.clipboardData;
+  var files = [];
+  Array.from((data && data.items) || []).forEach(function (item) {
+    if (item.kind !== "file") return;
+    var f = item.getAsFile();
+    if (f && isImageFile(f)) files.push(f);
+  });
+  e.preventDefault();
+  if (files.length) { importImages(files, viewCenter()); return; }
+  /* SVG markup copied from a code editor or a design tool. */
+  var text = data ? data.getData("text/plain").trim() : "";
+  if (/^(<\?xml[^>]*>\s*)?<svg[\s>]/i.test(text)) {
+    measureImage(svgDataUrl(text), false, "image/svg+xml", function (pic) {
+      sel = new Set([placePicture(pic, viewCenter(), 0).id]);
+      commit(); render();
+    });
+    return;
+  }
+  pasteClipboard();
+});
+
+/* ================================================================
    14. Editing commands
    ================================================================ */
 function patchSelected(patch) {
@@ -1861,6 +2061,9 @@ function copySelected() {
     texts: found.filter(function (f) { return f.kind === "text"; }).map(function (f) { return deepCopy(f.item); }),
     edges: found.filter(function (f) { return f.kind === "edge"; }).map(function (f) { return deepCopy(f.item); })
   };
+  /* Put something on the system clipboard too, so an old screenshot
+     sitting there does not win over these shapes on the next paste. */
+  try { if (navigator.clipboard) navigator.clipboard.writeText("Diagram studio shapes").catch(function () {}); } catch (err) { /* not allowed here */ }
   toast(found.length + (found.length === 1 ? " item copied" : " items copied"));
 }
 function pasteClipboard() {
@@ -1935,6 +2138,7 @@ var TOOLS = [
   { id: "sketch",  icon: "sketch",  title: "Inked box",       key: "S" },
   { id: "ellipse", icon: "ellipse", title: "Ellipse",         key: "E" },
   { id: "table",   icon: "table",   title: "Table",           key: "G" },
+  { id: "image",   icon: "image",   title: "Import an image", key: "I" },
   { sep: true },
   { id: "text",    icon: "text",    title: "Text",            key: "T" },
   { id: "connect", icon: "connect", title: "Draw an arrow",   key: "C" }
@@ -2174,6 +2378,10 @@ window.addEventListener("pointermove", function (event) {
     } else {
       node.h = Math.max(minH, snap(point.y) - box.y);
     }
+    if (node.type === "image" && node.natW && node.natH && !event.shiftKey) {
+      node.h = Math.max(10, Math.round(node.w * node.natH / node.natW));
+      if (drag.corner === "nw" || drag.corner === "ne") node.y = bottom - node.h;
+    }
     renderCanvas();
     return;
   }
@@ -2312,8 +2520,10 @@ stage.addEventListener("wheel", function (event) {
   }
 }, { passive: false });
 
+var menuPoint = null;
 stage.addEventListener("contextmenu", function (event) {
   event.preventDefault();
+  menuPoint = toStage(event);
   var d = event.target.dataset || {};
   var id = d.nodeId || d.edgeId || d.textId;
   if (id && !sel.has(id)) selectOnly(id);
@@ -2346,6 +2556,7 @@ function defaultField(id, point) {
     var cell = point ? cellAt(f.item, point) : { r: 0, c: 0 };
     return cellField(cell.r, cell.c);
   }
+  if (f.kind === "node" && f.item.type === "image") return null;
   return f.kind === "node" ? "title" : f.kind === "text" ? "text" : "label";
 }
 stage.addEventListener("dblclick", function (event) {
@@ -2375,6 +2586,7 @@ function openEditorSoon(id, field) { window.setTimeout(function () { openEditor(
 function openEditor(id, field) {
   var found = findAny(id);
   if (!found) return;
+  if (!field) return;
   if (editing && editing.id === id && editing.field === field) return;
   if (editing) closeEditor();
   if (drag) { drag = null; guides = []; marquee = null; ghost = null; }
@@ -2942,6 +3154,30 @@ function placeBubble() {
   bubble.style.left = left + "px";
   bubble.style.top = y + "px";
 }
+function buildImageBubble(node) {
+  bubble.appendChild(toolButton({
+    label: "Frame", title: "Draw a hand-ruled border around it", pressed: !!node.frame,
+    onClick: function () { patchSelected({ frame: function (it) { return it.type === "image" ? !it.frame : undefined; } }); }
+  }));
+  if (node.frame) {
+    bubble.appendChild(colorControl(node.accent, "Frame colour", function (hex) { patchSelected({ accent: hex }); }));
+  }
+  bubble.appendChild(toolButton({
+    label: "Sketchy", title: "Give the picture a hand-drawn wobble", pressed: !!node.wobble,
+    onClick: function () { patchSelected({ wobble: function (it) { return it.type === "image" ? !it.wobble : undefined; } }); }
+  }));
+  bubble.appendChild(divider());
+  bubble.appendChild(toolButton({
+    label: "Natural shape", title: "Undo any stretching  (Shift while resizing stretches)",
+    disabled: !node.natW || Math.abs(node.h - node.w * node.natH / node.natW) < 1,
+    onClick: function () { patchSelected({ h: function (it) { return it.type === "image" && it.natW ? Math.round(it.w * it.natH / it.natW) : undefined; } }); }
+  }));
+  bubble.appendChild(toolButton({
+    icon: "image", label: "Replace", title: "Swap in a different picture",
+    onClick: function () { openImagePicker(null, node.id); }
+  }));
+}
+
 function renderBubble() {
   clear(bubble);
   var list = selList();
@@ -2952,7 +3188,8 @@ function renderBubble() {
     buildMultiBubble();
   } else {
     var found = list[0];
-    if (found.kind === "node") buildNodeBubble(found.item);
+    if (found.kind === "node" && found.item.type === "image") buildImageBubble(found.item);
+    else if (found.kind === "node") buildNodeBubble(found.item);
     else if (found.kind === "edge") buildEdgeBubble(found.item);
     else buildTextBubble(found.item);
   }
@@ -2975,7 +3212,8 @@ function buildRail() {
     if (t.sep) { rail.appendChild(htmlEl("div", "spacer")); return; }
     var b = toolButton({
       icon: t.icon, title: t.title + "  (" + t.key + ")",
-      pressed: t.id === tool, onClick: function () { setTool(t.id); }, size: 18
+      pressed: t.id === tool, size: 18,
+      onClick: function () { if (t.id === "image") openImagePicker(); else setTool(t.id); }
     });
     b.dataset.tool = t.id;
     rail.appendChild(b);
@@ -3047,6 +3285,17 @@ function buildDrawer() {
     host.appendChild(b);
   });
 
+  var pick = htmlEl("button", "image-tile");
+  pick.type = "button";
+  var art = htmlEl("span");
+  art.style.cssText = "display:grid;place-items:center;width:56px;height:32px";
+  art.appendChild(icon("image", 22));
+  pick.appendChild(art);
+  pick.appendChild(htmlEl("span", null, "Image"));
+  pick.dataset.tip = "PNG, JPG, GIF, WebP or SVG. You can also drop or paste them.";
+  pick.addEventListener("click", function () { openImagePicker(); });
+  host.appendChild(pick);
+
   var tones = $("tones");
   clear(tones);
   PRESETS.forEach(function (preset, i) {
@@ -3071,6 +3320,13 @@ function buildDrawer() {
 $("stagewrap").addEventListener("dragover", function (e) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; });
 $("stagewrap").addEventListener("drop", function (e) {
   e.preventDefault();
+  var files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+  if (files.length) {
+    var pictures = files.filter(isImageFile);
+    if (pictures.length) importImages(pictures, toStage(e));
+    else toast("Only pictures can be dropped here: PNG, JPG, GIF, WebP or SVG");
+    return;
+  }
   var data = e.dataTransfer.getData("text/plain") || "";
   if (data.indexOf("shape:") !== 0) return;
   var parts = data.split(":");
@@ -3134,6 +3390,7 @@ function fileMenu() {
   return [
     { label: "New sketch", icon: "file", run: newDoc },
     { label: "Open a file…", icon: "folder", key: MOD + "+O", run: function () { $("fileInput").click(); } },
+    { label: "Import an image…", icon: "image", key: "I", run: function () { openImagePicker(); } },
     { label: "Save a copy", icon: "save", key: MOD + "+S", run: saveJson },
     "-",
     { header: "Export" },
@@ -3203,6 +3460,7 @@ function openContextMenu(x, y) {
   } else {
     defs = [
       { label: "Paste here", disabled: !clipboard, run: pasteClipboard },
+      { label: "Insert an image…", icon: "image", run: function () { openImagePicker(menuPoint); } },
       { label: "Select everything", run: selectAll },
       "-",
       { label: "Fit the sheet", run: fitView },
@@ -3418,7 +3676,7 @@ function exportHtml() {
 function saveJson() {
   download(fileBase() + ".json", JSON.stringify({
     format: "diagram-studio", version: 3, title: doc.title,
-    roughness: roughness, pages: doc.pages
+    roughness: roughness, pages: doc.pages, assets: usedAssets()
   }, null, 2), "application/json");
   toast("Saved a copy");
 }
@@ -3469,6 +3727,11 @@ function openJsonText(text) {
     doc.title = o.title || "Untitled sketch";
     doc.pages = pages;
     doc.active = 0;
+    if (o.assets && typeof o.assets === "object") {
+      Object.keys(o.assets).forEach(function (k) {
+        if (/^data:image\//.test(o.assets[k])) assets[k] = o.assets[k];
+      });
+    }
     if (o.roughness && ROUGHNESS[o.roughness]) { roughness = o.roughness; $("rough").value = roughness; buildFilters(); }
     sel.clear(); past = []; future = []; snapshot = null;
     $("docTitle").value = doc.title;
@@ -3501,7 +3764,8 @@ function showShortcuts() {
     m.appendChild(htmlEl("p", "sub", "These all work while the sheet has focus."));
     var keys = htmlEl("div", "keys");
     [["V  H", "Select, pan"], ["B  D  S  E", "Box, diamond, inked, ellipse"], ["G", "Table"],
-     ["T", "Text"], ["C", "Draw an arrow"],
+     ["T", "Text"], ["C", "Draw an arrow"], ["I", "Import an image"],
+     [MOD + " + V", "Paste shapes, or a picture you copied"],
      ["Double click", "Type on a shape, arrow or label"], ["Enter", "Edit whatever is selected"],
      ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
      [MOD + " + Z", "Undo"], [MOD + " + Shift + Z", "Redo"],
@@ -3629,7 +3893,7 @@ document.addEventListener("keydown", function (event) {
     if (k === "y") { event.preventDefault(); redo(); return; }
     if (k === "c") { event.preventDefault(); copySelected(); return; }
     if (k === "x") { event.preventDefault(); copySelected(); deleteSelected(); return; }
-    if (k === "v") { event.preventDefault(); pasteClipboard(); return; }
+    if (k === "v") return;   /* handled by the paste event, which can see pictures */
     if (k === "d") { event.preventDefault(); duplicateSelected(); return; }
     if (k === "a") { event.preventDefault(); selectAll(); return; }
     if (k === "s") { event.preventDefault(); saveJson(); return; }
@@ -3669,6 +3933,7 @@ document.addEventListener("keydown", function (event) {
     return;
   }
 
+  if (event.key.toLowerCase() === "i") { openImagePicker(); return; }
   var shortcut = SHORTCUT_TOOLS[event.key.toLowerCase()];
   if (shortcut) setTool(shortcut);
 });
