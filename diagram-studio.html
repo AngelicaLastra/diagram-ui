@@ -933,6 +933,14 @@ function blankCells(rows, cols) {
   for (var r = 0; r < rows; r++) { out.push([]); for (var c = 0; c < cols; c++) out[r].push(""); }
   return out;
 }
+/* Cell highlights live in a grid shaped like the cells (null means no
+   fill), so adding or removing rows keeps every colour on its cell. */
+function syncFills(node) {
+  var old = Array.isArray(node.fills) ? node.fills : [];
+  node.fills = node.cells.map(function (row, r) {
+    return row.map(function (_, c) { return (old[r] && old[r][c]) || null; });
+  });
+}
 function tableSize(node) {
   var rows = node.cells.length, cols = node.cells[0].length;
   return { rows: rows, cols: cols, cw: node.w / cols, ch: node.h / rows };
@@ -1278,6 +1286,17 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
       fill: node.accent, "fill-opacity": node.filled ? 0.22 : 0.12
     }));
   }
+  for (r = 0; r < t.rows; r++) {
+    for (c = 0; c < t.cols; c++) {
+      var fill = node.fills[r][c];
+      if (!fill) continue;
+      var lit = cellBox(node, r, c);
+      shapeGroup.appendChild(makeEl("path", {
+        d: wobblyPath(cornersFor({ x: lit.x + 1.5, y: lit.y + 1.5, w: lit.w - 3, h: lit.h - 3 }), jitter * 0.5, random),
+        fill: fill, "fill-opacity": 0.72
+      }));
+    }
+  }
   if (node.style !== "sketch") {
     shapeGroup.appendChild(makeEl("path", Object.assign({
       d: wobblyPath(cornersFor(node), jitter * 0.5, random),
@@ -1430,6 +1449,21 @@ function renderCanvas() {
    11. Overlay: selection, handles, anchors, guides
    ================================================================ */
 var marquee = null, guides = [], ghost = null, drag = null, hoverNode = null;
+var activeCell = null;   /* { id, r, c } of the cell last clicked in a table */
+
+function currentCell() {
+  var list = selList();
+  if (!activeCell || list.length !== 1 || list[0].item.id !== activeCell.id) return null;
+  var node = list[0].item, t = tableSize(node);
+  if (activeCell.r >= t.rows || activeCell.c >= t.cols) return null;
+  return { node: node, r: activeCell.r, c: activeCell.c };
+}
+function setCellFill(hex) {
+  var cur = currentCell();
+  if (!cur) return;
+  cur.node.fills[cur.r][cur.c] = hex;
+  commit(); render();
+}
 
 function boxOf(found) {
   if (found.kind === "node") {
@@ -1538,6 +1572,17 @@ function drawOverlay() {
   if (drag && drag.type !== "connect") return;
 
   var single = chosenList.length === 1 ? chosenList[0] : null;
+
+  var cur = currentCell();
+  if (cur) {
+    var cb = cellBox(cur.node, cur.r, cur.c);
+    overlay.appendChild(makeEl("rect", {
+      x: (cb.x + 2 * k).toFixed(1), y: (cb.y + 2 * k).toFixed(1),
+      width: Math.max(1, cb.w - 4 * k).toFixed(1), height: Math.max(1, cb.h - 4 * k).toFixed(1),
+      fill: "none", stroke: RED, "stroke-width": (1.4 * k).toFixed(2),
+      "stroke-dasharray": (3 * k) + " " + (2.5 * k), rx: 2 * k
+    }));
+  }
 
   if (single && single.kind === "node") {
     var n = single.item;
@@ -1662,7 +1707,7 @@ function makeNode(type, style, at, tone) {
     title: "", sub: "", titleSize: 11.5, titleColor: INK,
     bold: false, italic: false, strike: false, underline: false
   };
-  if (type === "table") { node.cells = blankCells(3, 3); node.header = true; }
+  if (type === "table") { node.cells = blankCells(3, 3); node.header = true; syncFills(node); }
   return node;
 }
 
@@ -1670,12 +1715,16 @@ function makeNode(type, style, at, tone) {
    around them instead of squashing what is already there. */
 function addTableRow(node, at) {
   var t = tableSize(node);
-  node.cells.splice(at == null ? t.rows : at, 0, node.cells[0].map(function () { return ""; }));
+  var r = at == null ? t.rows : at;
+  node.cells.splice(r, 0, node.cells[0].map(function () { return ""; }));
+  node.fills.splice(r, 0, node.cells[0].map(function () { return null; }));
   node.h = Math.round(node.h + t.ch);
 }
 function addTableCol(node, at) {
   var t = tableSize(node);
-  node.cells.forEach(function (row) { row.splice(at == null ? t.cols : at, 0, ""); });
+  var c = at == null ? t.cols : at;
+  node.cells.forEach(function (row) { row.splice(c, 0, ""); });
+  node.fills.forEach(function (row) { row.splice(c, 0, null); });
   node.w = Math.round(node.w + t.cw);
 }
 function editTables(change) {
@@ -1685,9 +1734,10 @@ function editTables(change) {
     var t = tableSize(n);
     if (change === "addRow") addTableRow(n);
     if (change === "addCol") addTableCol(n);
-    if (change === "dropRow" && t.rows > 1) { n.cells.pop(); n.h = Math.max(MIN_H, Math.round(n.h - t.ch)); }
+    if (change === "dropRow" && t.rows > 1) { n.cells.pop(); n.fills.pop(); n.h = Math.max(MIN_H, Math.round(n.h - t.ch)); }
     if (change === "dropCol" && t.cols > 1) {
       n.cells.forEach(function (row) { row.pop(); });
+      n.fills.forEach(function (row) { row.pop(); });
       n.w = Math.max(MIN_W, Math.round(n.w - t.cw));
     }
   });
@@ -1997,6 +2047,11 @@ stage.addEventListener("pointerdown", function (event) {
   if (tool === "text") { addFreeText(point); setTool("select"); return; }
 
   if (hitId) {
+    var hitNode = d.nodeId ? findNode(d.nodeId) : null;
+    if (hitNode && hitNode.type === "table") {
+      var picked = cellAt(hitNode, point);
+      activeCell = { id: hitNode.id, r: picked.r, c: picked.c };
+    }
     if (event.shiftKey || event.metaKey || event.ctrlKey) selectToggle(hitId);
     else if (!sel.has(hitId)) selectOnly(hitId);
     else afterSelect();
@@ -2265,13 +2320,15 @@ stage.addEventListener("pointerdown", function (event) {
   if (event.button !== 0) return;
   var id = idFromTarget(event.target);
   var now = Date.now();
-  if (id && lastTap.id === id && now - lastTap.t < 520 && !editing) {
+  var point = toStage(event);
+  /* In a table, two quick taps only count as a double tap on the same cell. */
+  var spot = id ? id + "/" + defaultField(id, point) : null;
+  if (spot && lastTap.id === spot && now - lastTap.t < 520 && !editing) {
     lastTap = { id: null, t: 0 };
     tapOpening = true;
-    var point = toStage(event);
     window.setTimeout(function () { openEditor(id, defaultField(id, point)); }, 0);
   } else {
-    lastTap = { id: id, t: now };
+    lastTap = { id: spot, t: now };
   }
 }, true);
 
@@ -2286,6 +2343,8 @@ function openEditor(id, field) {
 
   sel = new Set([id]);
   tapOpening = false;
+  var opening = parseCell(field);
+  if (opening) activeCell = { id: id, r: opening.r, c: opening.c };
   editing = { id: id, kind: found.kind, field: field, before: stateJSON() };
 
   var cell = parseCell(field);
@@ -2539,6 +2598,19 @@ function buildNodeBubble(node) {
       .forEach(function (a) {
         bubble.appendChild(toolButton({ icon: a[1], title: a[2], onClick: function () { editTables(a[0]); } }));
       });
+    var cur = currentCell();
+    if (cur) {
+      var now = cur.node.fills[cur.r][cur.c];
+      bubble.appendChild(divider());
+      bubble.appendChild(htmlEl("span", null, "Cell"));
+      bubble.appendChild(paletteRow(now, function (preset) { setCellFill(preset.fill); }));
+      bubble.appendChild(colorControl(now || node.fill, "Any colour for this cell", setCellFill));
+      bubble.appendChild(toolButton({
+        label: "Clear", title: "Take the colour off this cell", disabled: !now,
+        onClick: function () { setCellFill(null); }
+      }));
+      bubble.appendChild(divider());
+    }
     bubble.appendChild(toolButton({
       label: "Header", title: "Shade the first row", pressed: !!node.header,
       onClick: function () { patchSelected({ header: function (it) { return it.type === "table" ? !it.header : undefined; } }); }
@@ -3172,6 +3244,7 @@ function upgradeNode(n) {
   if (o.type === "table" && !(Array.isArray(o.cells) && o.cells.length && o.cells[0].length)) {
     o.cells = blankCells(3, 3);
   }
+  if (o.type === "table") syncFills(o);
   return o;
 }
 function upgradeEdge(e) {
