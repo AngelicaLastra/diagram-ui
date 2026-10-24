@@ -1225,8 +1225,13 @@ function parseCell(field) {
   return m ? { r: +m[1], c: +m[2] } : null;
 }
 
-function anchorPoint(node, side) {
+/* row: on a table, the left and right sides can anchor at a row's middle */
+function anchorPoint(node, side, row) {
   var mid = center(node);
+  if (row != null && node.type === "table" && (side === "left" || side === "right")) {
+    var y = node.y + (row + 0.5) * tableSize(node).ch;
+    return { x: side === "left" ? node.x : node.x + node.w, y: y };
+  }
   if (side === "top")    return { x: mid.x, y: node.y };
   if (side === "bottom") return { x: mid.x, y: node.y + node.h };
   if (side === "left")   return { x: node.x, y: mid.y };
@@ -1312,10 +1317,14 @@ function edgeGeometry(edge) {
   if (!from || !to) return null;
 
   var auto = autoSides(from, to);
-  var fromSide = (!edge.fromSide || edge.fromSide === "auto") ? auto[0] : edge.fromSide;
-  var toSide = (!edge.toSide || edge.toSide === "auto") ? auto[1] : edge.toSide;
+  var fromRow = edgeRow(from, edge.fromRow), toRow = edgeRow(to, edge.toRow);
+  /* an end tied to a row leaves from the left or right, whichever faces
+     the other shape, when its side is left on auto */
+  var leftOf = center(to).x >= center(from).x;
+  var fromSide = (!edge.fromSide || edge.fromSide === "auto") ? (fromRow != null ? (leftOf ? "right" : "left") : auto[0]) : edge.fromSide;
+  var toSide = (!edge.toSide || edge.toSide === "auto") ? (toRow != null ? (leftOf ? "left" : "right") : auto[1]) : edge.toSide;
 
-  var start = anchorPoint(from, fromSide), end = anchorPoint(to, toSide);
+  var start = anchorPoint(from, fromSide, fromRow), end = anchorPoint(to, toSide, toRow);
   var dirStart = outward(fromSide), dirEnd = outward(toSide);
   var span = Math.sqrt(Math.pow(end.x - start.x, 2) + Math.pow(end.y - start.y, 2));
 
@@ -2138,16 +2147,25 @@ function drawOverlay() {
   else if (drag && drag.type === "connect") { anchorNodes = nodes(); }
 
   anchorNodes.forEach(function (node) {
+    var spots = [];
     SIDES.forEach(function (side) {
-      var point = anchorPoint(node, side);
-      var chosen = (connectFrom && connectFrom.id === node.id && connectFrom.side === side) ||
-                   (drag && drag.type === "connect" && drag.hot && drag.hot.id === node.id && drag.hot.side === side);
+      if (node.type === "table" && (side === "left" || side === "right")) {
+        node.cells.forEach(function (_, row) { spots.push({ side: side, row: row }); });
+      } else {
+        spots.push({ side: side, row: null });
+      }
+    });
+    spots.forEach(function (spot) {
+      var side = spot.side, point = anchorPoint(node, side, spot.row);
+      function same(a) { return a && a.id === node.id && a.side === side && (a.row == null ? null : a.row) === spot.row; }
+      var chosen = same(connectFrom) || (drag && drag.type === "connect" && same(drag.hot));
       var dot = makeEl("circle", {
-        cx: point.x.toFixed(1), cy: point.y.toFixed(1), r: ((chosen ? 5.2 : 3.8) * k).toFixed(1),
+        cx: point.x.toFixed(1), cy: point.y.toFixed(1), r: ((chosen ? 5.2 : spot.row != null ? 3.2 : 3.8) * k).toFixed(1),
         fill: chosen ? RED : "#FFFFFF", stroke: RED, "stroke-width": (1.4 * k).toFixed(2), class: "grab"
       });
       dot.dataset.anchorNode = node.id;
       dot.dataset.anchorSide = side;
+      if (spot.row != null) dot.dataset.anchorRow = spot.row;
       overlay.appendChild(dot);
     });
   });
@@ -2327,6 +2345,7 @@ function addTableRow(node, at) {
   if (!node.aligns) syncFills(node);
   var t = tableSize(node);
   var r = at == null ? t.rows : at;
+  if (r < t.rows) shiftEdgeRows(node.id, function (row) { return row >= r ? row + 1 : row; });
   node.cells.splice(r, 0, node.cells[0].map(function () { return ""; }));
   node.fills.splice(r, 0, node.cells[0].map(function () { return null; }));
   node.aligns.splice(r, 0, node.cells[0].map(function () { return null; }));
@@ -2342,6 +2361,18 @@ function addTableCol(node, at) {
   ws.splice(c, 0, fresh);
   node.colW = ws.map(function (w) { return Math.round(w); });
   node.w = Math.round(node.w + fresh);
+}
+/* Keeps arrows on the same row when rows come or go above it; fix maps
+   an old row to its new one, or null when the row itself is gone. */
+function shiftEdgeRows(tableId, fix) {
+  edges().forEach(function (e) {
+    ["from", "to"].forEach(function (end) {
+      var key = end + "Row";
+      if (e[end] !== tableId || e[key] == null) return;
+      var v = fix(e[key]);
+      if (v == null) delete e[key]; else e[key] = v;
+    });
+  });
 }
 /* Deletes rows (axis "r") or columns ("c") a0 to a1. The others keep
    their size, so the table shrinks around the gap. A merged region that
@@ -2364,6 +2395,7 @@ function deleteTableSpan(n, axis, a0, a1) {
     return axis === "r" ? { r: moved, c: m.c, rs: len - cut, cs: m.cs } : { r: m.r, c: moved, rs: m.rs, cs: len - cut };
   });
   if (axis === "r") {
+    shiftEdgeRows(n.id, function (r) { return r < a0 ? r : r > a1 ? r - count : null; });
     n.cells.splice(a0, count); n.fills.splice(a0, count); n.aligns.splice(a0, count);
     n.h = Math.max(MIN_H, Math.round(n.h - count * t.ch));
   } else {
@@ -2423,12 +2455,15 @@ function addFreeText(at) {
   openEditorSoon(item.id, "text");
   return item;
 }
-function makeEdge(fromId, fromSide, toId, toSide) {
-  return {
+function makeEdge(fromId, fromSide, toId, toSide, fromRow, toRow) {
+  var e = {
     id: uid("e"), from: fromId, to: toId, fromSide: fromSide, toSide: toSide,
     color: LINE, weight: 1.6, dashed: false, label: "", onPath: true,
     shape: "curve", detour: 0, labelSize: 9.5, head: "arrow", tail: "none"
   };
+  if (fromRow != null) e.fromRow = fromRow;
+  if (toRow != null) e.toRow = toRow;
+  return e;
 }
 
 /* ================================================================
@@ -2861,6 +2896,22 @@ function nodeAt(point) {
   }
   return null;
 }
+/* A usable row for an arrow end, or null for the side's middle. */
+function edgeRow(node, row) {
+  return node && node.type === "table" && row != null && row >= 0 && row < node.cells.length ? row : null;
+}
+/* Where a pointer over a shape would attach an arrow. On a table it is
+   the nearest edge line, and on the left or right edge the row under
+   the pointer, so arrows can point at a row. */
+function attachAt(node, point) {
+  if (node.type !== "table") return { side: nearestSide(node, point), row: null };
+  var gaps = { left: Math.abs(point.x - node.x), right: Math.abs(point.x - node.x - node.w),
+               top: Math.abs(point.y - node.y), bottom: Math.abs(point.y - node.y - node.h) };
+  var side = Object.keys(gaps).sort(function (a, b) { return gaps[a] - gaps[b]; })[0];
+  if (side === "top" || side === "bottom") return { side: side, row: null };
+  var row = clamp(Math.floor((point.y - node.y) / tableSize(node).ch), 0, node.cells.length - 1);
+  return { side: side, row: row };
+}
 function nearestSide(node, point) {
   var best = "top", bd = Infinity;
   SIDES.forEach(function (side) {
@@ -2870,15 +2921,16 @@ function nearestSide(node, point) {
   });
   return best;
 }
-function startOrFinishConnection(id, side) {
+function startOrFinishConnection(id, side, row) {
+  row = row == null || row === "" ? null : +row;
   if (!connectFrom) {
-    connectFrom = { id: id, side: side };
+    connectFrom = { id: id, side: side, row: row };
     setHint("Now click an edge dot on the shape the arrow points to.");
     drawOverlay();
     return;
   }
   if (connectFrom.id === id) { connectFrom = null; drawOverlay(); return; }
-  edges().push(makeEdge(connectFrom.id, connectFrom.side, id, side));
+  edges().push(makeEdge(connectFrom.id, connectFrom.side, id, side, connectFrom.row, row));
   connectFrom = null;
   commit(); render();
   setHint("Arrow drawn. Double click it to add a label.");
@@ -2947,8 +2999,9 @@ stage.addEventListener("pointerdown", function (event) {
 
   /* drag out of an edge dot, or click-to-connect with the arrow tool */
   if (d.anchorSide) {
-    if (tool === "connect") { startOrFinishConnection(d.anchorNode, d.anchorSide); return; }
-    drag = { type: "connect", fromId: d.anchorNode, fromSide: d.anchorSide, start: point, hot: null, preview: null };
+    var fromRow = d.anchorRow === undefined ? null : +d.anchorRow;
+    if (tool === "connect") { startOrFinishConnection(d.anchorNode, d.anchorSide, fromRow); return; }
+    drag = { type: "connect", fromId: d.anchorNode, fromSide: d.anchorSide, fromRow: fromRow, start: point, hot: null, preview: null };
     stage.setPointerCapture(event.pointerId);
     return;
   }
@@ -2976,7 +3029,7 @@ stage.addEventListener("pointerdown", function (event) {
 
   var hitId = d.nodeId || d.edgeId || d.textId || null;
 
-  if (tool === "connect" && d.nodeId) { startOrFinishConnection(d.nodeId, nearestSide(findNode(d.nodeId), point)); return; }
+  if (tool === "connect" && d.nodeId) { var spot = attachAt(findNode(d.nodeId), point); startOrFinishConnection(d.nodeId, spot.side, spot.row); return; }
 
   /* A shape or text tool wins over whatever is already under the pointer,
      so you can drop something on top of an existing shape. */
@@ -3153,12 +3206,13 @@ window.addEventListener("pointermove", function (event) {
   if (drag.type === "connect") {
     var over = nodeAt(point);
     if (over && over.id === drag.fromId) over = null;
-    drag.hot = over ? { id: over.id, side: nearestSide(over, point) } : null;
+    var spot = over ? attachAt(over, point) : null;
+    drag.hot = over ? { id: over.id, side: spot.side, row: spot.row } : null;
 
     var from = findNode(drag.fromId);
-    var startPt = anchorPoint(from, drag.fromSide);
+    var startPt = anchorPoint(from, drag.fromSide, drag.fromRow);
     var dir = outward(drag.fromSide);
-    var endPt = drag.hot ? anchorPoint(over, drag.hot.side) : point;
+    var endPt = drag.hot ? anchorPoint(over, drag.hot.side, drag.hot.row) : point;
     var span = Math.hypot(endPt.x - startPt.x, endPt.y - startPt.y);
     var pull = Math.max(30, span * 0.4);
     var endDir = drag.hot ? outward(drag.hot.side) : { x: 0, y: 0 };
@@ -3245,7 +3299,7 @@ function endDrag(event) {
 
   if (d.type === "connect") {
     if (d.hot) {
-      edges().push(makeEdge(d.fromId, d.fromSide, d.hot.id, d.hot.side));
+      edges().push(makeEdge(d.fromId, d.fromSide, d.hot.id, d.hot.side, d.fromRow, d.hot.row));
       commit(); render();
       setHint("Arrow drawn. Double click it to add a label.");
     } else if (point && Math.hypot(point.x - d.start.x, point.y - d.start.y) * viewScale() < 4) {
@@ -3944,6 +3998,23 @@ function buildEdgeBubble(edge) {
     edge.fromSide || "auto", "Leaves from", function (v) { patchSelected({ fromSide: v }); }));
   bubble.appendChild(selectControl(SIDES.concat(["auto"]).map(function (s) { return [s, s]; }),
     edge.toSide || "auto", "Arrives at", function (v) { patchSelected({ toSide: v }); }));
+  /* an end on a table can be tied to one of its rows */
+  [["from", "fromRow", "fromSide", "From row"], ["to", "toRow", "toSide", "To row"]].forEach(function (end) {
+    var table = findNode(edge[end[0]]);
+    if (!table || table.type !== "table") return;
+    var options = [["", "Whole side"]].concat(table.cells.map(function (row, r) {
+      var words = row.filter(Boolean)[0];
+      return [String(r), "Row " + (r + 1) + (words ? ": " + words.split("\n")[0].slice(0, 18) : "")];
+    }));
+    var now = edgeRow(table, edge[end[1]]);
+    bubble.appendChild(selectControl(options, now == null ? "" : String(now), end[3], function (v) {
+      var patch = {};
+      patch[end[1]] = v === "" ? null : +v;
+      /* a row sits on the left or right, so a top or bottom side goes back to auto */
+      patch[end[2]] = function (it) { return v !== "" && (it[end[2]] === "top" || it[end[2]] === "bottom") ? "auto" : undefined; };
+      patchSelected(patch);
+    }));
+  });
   bubble.appendChild(toolButton({
     label: "Flip", title: "Turn the arrow around",
     onClick: function () {
