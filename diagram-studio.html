@@ -262,6 +262,7 @@ svg#stage.painty { cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w
 #overlay .col-grip:hover, #overlay .col-grip.live { fill: rgba(221, 75, 68, 0.28); }
 #shapes g[data-key], #labels g[data-key] { transition: opacity 200ms ease; }
 #overlay { pointer-events: none; }
+#flows { pointer-events: none; }
 #overlay .grab { pointer-events: all; }
 
 .zoom-label { min-width: 46px; text-align: center; font-size: 12px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
@@ -519,6 +520,7 @@ input[type="color"] {
           <rect id="bg" x="0" y="0" width="900" height="660" fill="#FFFFFF"/>
           <rect id="gridRect" x="0" y="0" width="900" height="660" fill="url(#grid)"/>
           <g id="shapes" font-family="Poppins, system-ui, sans-serif"></g>
+          <g id="flows"></g>
           <g id="labels" font-family="Poppins, system-ui, sans-serif"></g>
           <g id="hits"></g>
           <g id="overlay"></g>
@@ -624,6 +626,7 @@ var ICONS = {
   merge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M5.5 9 H12.5 M10.5 7 L12.5 9 L10.5 11 M7.5 7 L5.5 9 L7.5 11"/></g>',
   unmerge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M9 4 V14" stroke-dasharray="1.6 1.8"/><path d="M7 9 H4.5 M5.8 7.6 L4.4 9 L5.8 10.4 M11 9 H13.5 M12.2 7.6 L13.6 9 L12.2 10.4"/></g>',
   wrap: '<g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5 H15"/><path d="M3 9 H12.5 a2.25 2.25 0 0 1 0 4.5 H9"/><path d="M10.6 11.9 L9 13.5 L10.6 15.1"/><path d="M3 13.5 H6"/></g>',
+  flow: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2.5 9 H15.5" opacity=".45" stroke-width="3.6"/></g><g fill="currentColor"><circle cx="5" cy="9" r="1.5"/><circle cx="9.5" cy="9" r="1.9"/><circle cx="14" cy="9" r="1.5"/></g>',
   vTop: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 3.5 H15"/><path d="M6 7 H12 M6 10 H12"/></g>',
   vMid: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 9 H4.5 M13.5 9 H15" opacity=".5"/><path d="M6 7.5 H12 M6 10.5 H12"/></g>',
   vBot: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 14.5 H15"/><path d="M6 8 H12 M6 11 H12"/></g>',
@@ -1625,7 +1628,7 @@ var keyCache = { shapes: new Map(), labels: new Map(), hits: new Map() };
 
 function resetDom() {
   keyCache.shapes.clear(); keyCache.labels.clear(); keyCache.hits.clear();
-  clear(shapesLayer); clear(labelsLayer); clear(hitsGroup);
+  clear(shapesLayer); clear(labelsLayer); clear(hitsGroup); clear($("flows"));
 }
 function keyedGroup(cacheName, key, useFilter) {
   var cache = keyCache[cacheName];
@@ -2279,6 +2282,7 @@ function drawEdge(edge) {
     "stroke-linecap": "round", "stroke-linejoin": "round"
   };
   if (edge.dashed) line["stroke-dasharray"] = "6 5";
+  line["data-line"] = "1";
   shapeGroup.appendChild(makeEl("path", line));
 
   if (edge.head !== "none") {
@@ -2346,6 +2350,121 @@ function drawFreeText(item) {
   });
 }
 
+/* ================================================================
+   10b. Flow along arrows
+        Something travels along a flowing arrow toward the shape it
+        points at, in one of three hand-drawn styles:
+          ink      a swell of ink slides along: the line itself thickens
+                   for a moment, like something squeezed through a
+                   fabric tube, then settles
+          ball     little wobbly pebbles that rock as they go
+          chevron  open > marks, the arrowhead's own shape, marching on
+        Each grows in after leaving the start and settles before the
+        arrowhead. Positions come from time alone, so the video export
+        can draw any moment.
+   ================================================================ */
+var flowLayer = $("flows");
+var flowFrame = null;
+var FLOW_PACE = 46, FLOW_SPAN = 30;   /* px per second at normal speed, ink swell length */
+var FLOW_STYLES = [["ink", "Ink swell"], ["ball", "Balls"], ["chevron", "Chevrons"]];
+var FLOW_GAPS = { ink: 130, ball: 58, chevron: 30 };
+
+function flowingEdges() { return edges().filter(function (e) { return e.flow; }); }
+
+/* One swell: a closed shape that hugs the line from at - span/2 to
+   at + span/2, widest in the middle and tapering to the line's own
+   width at both ends, with a little hand-drawn unevenness. */
+function swellPath(line, len, at, w, puff, random) {
+  var steps = 10, left = [], right = [];
+  for (var i = 0; i <= steps; i++) {
+    var t = i / steps, s = clamp(at - FLOW_SPAN / 2 + t * FLOW_SPAN, 0, len);
+    var p = line.getPointAtLength(s), q = line.getPointAtLength(Math.min(len, s + 0.8)), b = line.getPointAtLength(Math.max(0, s - 0.8));
+    var dx = q.x - b.x, dy = q.y - b.y, n = Math.hypot(dx, dy) || 1;
+    var half = w / 2 + puff * Math.pow(Math.sin(Math.PI * t), 1.5) * (0.85 + random() * 0.3);
+    left.push({ x: p.x - dy / n * half, y: p.y + dx / n * half });
+    right.push({ x: p.x + dy / n * half, y: p.y - dx / n * half });
+  }
+  var pts = left.concat(right.reverse()), f = function (v) { return v.toFixed(1); };
+  return "M" + pts.map(function (pt) { return f(pt.x) + "," + f(pt.y); }).join(" L") + " Z";
+}
+/* One pebble, drawn around 0,0 the way the sheet draws shapes: a filled
+   wobbly blob and a pen outline laid slightly off it. */
+function pebblePaths(seed, r) {
+  var random = makeRandom(hashOf(seed)), pts = [];
+  for (var i = 0; i < 9; i++) {
+    var a = (i / 9) * Math.PI * 2, rr = r * (0.86 + random() * 0.28);
+    pts.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr });
+  }
+  return {
+    body: closedPath(pts, r * 0.12, random),
+    pen: closedPath(jitterPoints(pts, r * 0.16, random), r * 0.14, random)
+  };
+}
+function drawFlows(ms) {
+  clear(flowLayer);
+  flowingEdges().forEach(function (e) {
+    var group = keyCache.shapes.get(e.id), line = group && group.querySelector("path[data-line]");
+    if (!line) return;
+    var style = FLOW_GAPS[e.flowStyle] ? e.flowStyle : "ink";
+    var len = line.getTotalLength(), margin = style === "ink" ? FLOW_SPAN / 2 : 0;
+    if (len < 2 * margin + 24) return;
+    var count = Math.max(1, Math.floor(len / FLOW_GAPS[style])), gap = len / count;
+    var shift = (ms / 1000 * FLOW_PACE * (e.flowSpeed || 1)) % gap;
+    var color = e.color || LINE, w = e.weight || 1.6;
+    var holder = makeEl("g", { "data-key": e.id });
+    holder.style.opacity = group.style.opacity;   /* hidden while the reveal hides the arrow */
+    for (var i = 0; i < count; i++) {
+      var at = i * gap + shift;
+      var grow = clamp(Math.min((at - margin) / 22, (len - at - margin - 12) / 22), 0, 1);
+      if (grow <= 0) continue;
+      var random = makeRandom(hashOf(e.id + ":" + i));
+      if (style === "ink") {
+        holder.appendChild(makeEl("path", {
+          d: swellPath(line, len, at, w, (1.3 + w * 0.9) * grow, random),
+          fill: color, "fill-opacity": (0.55 + 0.4 * grow).toFixed(2)
+        }));
+        continue;
+      }
+      var p = line.getPointAtLength(at), q = line.getPointAtLength(Math.min(len, at + 1.5));
+      var heading = Math.atan2(q.y - p.y, q.x - p.x) * 180 / Math.PI;
+      if (style === "ball") {
+        var r = 2.6 + w * 0.5, shape = pebblePaths(e.id + ":" + i, r);
+        /* it faces the way it travels and rocks a little as it goes */
+        var pebble = makeEl("g", {
+          transform: "translate(" + p.x.toFixed(1) + " " + p.y.toFixed(1) + ") rotate(" + (heading + 24 * Math.sin(at / 9)).toFixed(1) + ") scale(" + (0.7 + 0.3 * grow).toFixed(2) + ")",
+          opacity: grow.toFixed(2)
+        });
+        pebble.appendChild(makeEl("path", { d: shape.body, fill: color, "fill-opacity": 0.78 }));
+        pebble.appendChild(makeEl("path", {
+          d: shape.pen, fill: "none", stroke: color, "stroke-width": Math.max(0.8, w * 0.6).toFixed(2),
+          "stroke-linecap": "round", "stroke-linejoin": "round"
+        }));
+        holder.appendChild(pebble);
+      } else {
+        /* the arrowhead's open shape, a touch uneven, drawn by the same pen */
+        var size = 3.2 + w * 0.9, j = function () { return ((random() * 2 - 1) * size * 0.12).toFixed(2); };
+        holder.appendChild(makeEl("path", {
+          d: "M" + (-size) + "," + (-size * 0.85 + +j()) + " L" + j() + "," + j() + " L" + (-size) + "," + (size * 0.85 + +j()),
+          transform: "translate(" + p.x.toFixed(1) + " " + p.y.toFixed(1) + ") rotate(" + heading.toFixed(1) + ") scale(" + (0.6 + 0.4 * grow).toFixed(2) + ")",
+          fill: "none", stroke: color, "stroke-width": Math.max(1.1, w * 0.85).toFixed(2),
+          "stroke-linecap": "round", "stroke-linejoin": "round", opacity: grow.toFixed(2)
+        }));
+      }
+    }
+    flowLayer.appendChild(holder);
+  });
+}
+/* Runs while any arrow on the sheet flows. With reduced motion on, the
+   balls are drawn once and stay put. */
+function syncFlows() {
+  var want = flowingEdges().length > 0;
+  if (want && !reduceMotion && !flowFrame) {
+    flowFrame = requestAnimationFrame(function tick(now) { drawFlows(now); flowFrame = requestAnimationFrame(tick); });
+  }
+  if ((!want || reduceMotion) && flowFrame) { cancelAnimationFrame(flowFrame); flowFrame = null; }
+  drawFlows(reduceMotion ? 0 : performance.now());
+}
+
 function renderCanvas() {
   var p = page();
   paintPaper();
@@ -2373,6 +2492,7 @@ function renderCanvas() {
   syncLayer(hitsGroup, keyCache.hits, order);
 
   document.body.classList.toggle("no-texture", !textureOn);
+  syncFlows();
   drawOverlay();
 }
 
@@ -3223,6 +3343,7 @@ function styleOf(found) {
   } else if (kind === "edge") {
     st.line = it.color; st.textColor = it.labelColor || it.color; st.size = it.labelSize;
     st.weight = it.weight; st.dashed = !!it.dashed; st.head = it.head; st.tail = it.tail; st.onPath = it.onPath;
+    st.flow = !!it.flow; st.flowSpeed = it.flowSpeed; st.flowStyle = it.flowStyle;
   } else if (kind === "text") {
     st.line = it.color; st.textColor = it.color; st.size = it.size; st.anchor = it.anchor;
   } else if (kind === "code") {
@@ -3248,7 +3369,7 @@ function applyStyle(found, st) {
     if (kind === "table" && st.kind === "table") set("header", st.header);
   } else if (kind === "edge") {
     set("color", st.line); set("labelColor", st.textColor);
-    if (same) { set("labelSize", st.size); set("weight", st.weight); set("dashed", st.dashed); set("head", st.head); set("tail", st.tail); set("onPath", st.onPath); }
+    if (same) { set("labelSize", st.size); set("weight", st.weight); set("dashed", st.dashed); set("head", st.head); set("tail", st.tail); set("onPath", st.onPath); set("flow", st.flow); set("flowSpeed", st.flowSpeed); set("flowStyle", st.flowStyle); }
   } else if (kind === "text") {
     set("color", st.textColor || st.line);
     if (same) { set("size", st.size); set("anchor", st.anchor); }
@@ -4529,6 +4650,19 @@ function buildNodeBubble(node) {
   bubble.appendChild(divider());
   buildTextLook([node]);
 }
+function flowControls(list) {
+  var on = list.length > 0 && list.every(function (e) { return e.flow; });
+  bubble.appendChild(toolButton({
+    icon: "flow", label: "Flow", pressed: on, title: on ? "Stop the balls flowing" : "Send balls flowing along to the shape it points at",
+    onClick: function () { patchSelected({ flow: function (it, kind) { return kind === "edge" ? !on : undefined; } }); }
+  }));
+  if (on) {
+    bubble.appendChild(selectControl(FLOW_STYLES, FLOW_GAPS[list[0].flowStyle] ? list[0].flowStyle : "ink", "Flow style",
+      function (v) { patchSelected({ flowStyle: function (it, kind) { return kind === "edge" ? v : undefined; } }); }));
+    bubble.appendChild(selectControl([["0.5", "Slow"], ["1", "Normal"], ["2", "Fast"]], String(list[0].flowSpeed || 1), "Flow speed",
+      function (v) { patchSelected({ flowSpeed: function (it, kind) { return kind === "edge" ? +v : undefined; } }); }));
+  }
+}
 function buildEdgeBubble(edge) {
   [["curve", "routeCurve", "Curved"], ["elbow", "routeElbow", "Right angles"], ["straight", "routeStraight", "Straight"]]
     .forEach(function (r) {
@@ -4586,6 +4720,7 @@ function buildEdgeBubble(edge) {
       patchSelected(patch);
     }));
   });
+  flowControls([edge]);
   bubble.appendChild(toolButton({
     label: "Flip", title: "Turn the arrow around",
     onClick: function () {
@@ -4676,6 +4811,8 @@ function buildMultiBubble() {
       });
     }));
   }
+  var arrows = selList().filter(function (f) { return f.kind === "edge"; }).map(function (f) { return f.item; });
+  if (arrows.length) { bubble.appendChild(divider()); flowControls(arrows); }
   var worded = selList().filter(function (f) {
     return f.kind === "text" || f.kind === "edge" || (f.kind === "node" && isShape(f.item));
   }).map(function (f) { return f.item; });
@@ -6144,8 +6281,9 @@ function exportVideo(opts, onProgress, onDone, onFail) {
     function draw(ms, then) {
       /* only redraw when something on screen has changed */
       var look = Object.keys(plan.times).map(function (k) { return videoOpacity(plan.times, k, ms); }).join(",");
-      if (look === lastLook) { then(); return; }
+      if (look === lastLook && !flowingEdges().length) { then(); return; }
       lastLook = look;
+      drawFlows(ms);   /* balls where they are at this moment of the video */
       var svg = buildSvgString(true, { box: box, opacityOf: function (key) { return videoOpacity(plan.times, key, ms); } });
       var url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
       var image = new Image();
