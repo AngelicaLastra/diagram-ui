@@ -606,7 +606,8 @@ var SHAPE_KINDS = [
   { type: "ellipse", style: "wash",   label: "Ellipse" },
   { type: "pill",    style: "wash",   label: "Pill" },
   { type: "note",    style: "wash",   label: "Note" },
-  { type: "table",   style: "wash",   label: "Table" }
+  { type: "table",   style: "wash",   label: "Table" },
+  { type: "code",    style: "wash",   label: "Code" }
 ];
 var MIN_CELL_W = 28;
 var MIN_CELL_H = 22;
@@ -1347,7 +1348,7 @@ function fitTableRows(n) {
   n.rowH = need;
   n.h = need.reduce(function (a, b) { return a + b; }, 0);
 }
-function fitAllTables() { nodes().forEach(fitTableRows); }
+function fitAllTables() { nodes().forEach(function (n) { fitTableRows(n); fitCode(n); }); }
 /* Where a cell's text sits. Several lines stay a block, so top and bottom
    move the whole block rather than its middle line. */
 var CELL_PAD = 6;
@@ -1896,8 +1897,225 @@ function buildPenBar() {
   bubble.style.top = "12px";
 }
 
+/* Code blocks: a sketched card holding code, highlighted in the sheet's
+   own palette rather than an editor theme. Languages: sql, jinja (SQL
+   with dbt-style {{ }}, {% %} and {# #}), yaml (Jinja allowed inside),
+   and text. */
+var CODE_LANGS = [["sql", "SQL"], ["jinja", "Jinja + SQL"], ["yaml", "YAML"], ["text", "Plain text"]];
+var CODE_INK = {
+  kw: "#2E7A7B", fn: "#2E5E8C", str: "#B97F12", num: "#9E2F2A", com: "#8C8A80",
+  jd: "#8E7BB5", jk: "#5B4A85", jv: "#5B4A85", key: "#2E5E8C", punct: "#8C8A80", plain: INK
+};
+var SQL_WORDS = new Set(("select from where and or not null is in as on join left right inner outer full cross " +
+  "group by order having limit offset with union all distinct insert into values update set delete create " +
+  "table view replace if exists cast case when then else end between like ilike over partition qualify " +
+  "window asc desc true false using lateral merge matched returning materialized recursive top any some " +
+  "except intersect primary key references default alter drop add column").split(" "));
+var JINJA_WORDS = new Set(("if elif else endif for in endfor set endset macro endmacro call endcall filter " +
+  "endfilter block endblock extends include import from as with endwith is not and or true false none " +
+  "return do raw endraw snapshot endsnapshot test endtest").split(" "));
+var YAML_WORDS = new Set("true false yes no null on off ~".split(" "));
+
+function pushTok(out, text, kind) {
+  if (!text) return;
+  var last = out[out.length - 1];
+  if (last && last.kind === kind) last.text += text; else out.push({ text: text, kind: kind });
+}
+function nextChar(line, i) { var m = /\S/.exec(line.slice(i)); return m ? m[0] : ""; }
+
+/* SQL, carrying an open block comment from one line to the next. */
+function sqlTokens(text, state, out) {
+  var i = 0;
+  while (i < text.length) {
+    if (state.block) {
+      var shut = text.indexOf("*/", i);
+      if (shut < 0) { pushTok(out, text.slice(i), "com"); return; }
+      pushTok(out, text.slice(i, shut + 2), "com"); i = shut + 2; state.block = false; continue;
+    }
+    var rest = text.slice(i), m;
+    if ((m = /^--.*/.exec(rest))) { pushTok(out, m[0], "com"); i += m[0].length; continue; }
+    if (rest.indexOf("/*") === 0) { state.block = true; pushTok(out, "/*", "com"); i += 2; continue; }
+    if ((m = /^'(?:[^'\\]|\\.|'')*'?/.exec(rest))) { pushTok(out, m[0], "str"); i += m[0].length; continue; }
+    if ((m = /^"(?:[^"\\]|\\.)*"?/.exec(rest)) || (m = /^`[^`]*`?/.exec(rest))) { pushTok(out, m[0], "plain"); i += m[0].length; continue; }
+    if ((m = /^\d+(?:\.\d+)?\b/.exec(rest))) { pushTok(out, m[0], "num"); i += m[0].length; continue; }
+    if ((m = /^[A-Za-z_][\w$]*/.exec(rest))) {
+      var word = m[0], low = word.toLowerCase();
+      var kind = SQL_WORDS.has(low) ? "kw" : nextChar(text, i + word.length) === "(" ? "fn" : "plain";
+      pushTok(out, word, kind); i += word.length; continue;
+    }
+    if ((m = /^\s+/.exec(rest))) { pushTok(out, m[0], "plain"); i += m[0].length; continue; }
+    pushTok(out, text[i], /[(),;.=<>!+\-*\/%|:]/.test(text[i]) ? "punct" : "plain"); i++;
+  }
+}
+/* Inside {{ }} or {% %}: names, strings and numbers. */
+function jinjaTokens(text, out) {
+  var i = 0, m;
+  while (i < text.length) {
+    var rest = text.slice(i);
+    if ((m = /^'[^']*'?|^"[^"]*"?/.exec(rest))) { pushTok(out, m[0], "str"); i += m[0].length; continue; }
+    if ((m = /^\d+(?:\.\d+)?/.exec(rest))) { pushTok(out, m[0], "num"); i += m[0].length; continue; }
+    if ((m = /^[A-Za-z_]\w*/.exec(rest))) {
+      var word = m[0];
+      pushTok(out, word, JINJA_WORDS.has(word.toLowerCase()) ? "jk" : nextChar(text, i + word.length) === "(" ? "fn" : "jv");
+      i += word.length; continue;
+    }
+    pushTok(out, text[i], /\s/.test(text[i]) ? "plain" : "punct"); i++;
+  }
+}
+/* One YAML line outside any Jinja: comments, keys, list dashes, values. */
+function yamlTokens(text, atLineStart, out) {
+  var m, i = 0;
+  if (atLineStart) {
+    if ((m = /^(\s*)(#.*)$/.exec(text))) { pushTok(out, m[1], "plain"); pushTok(out, m[2], "com"); return; }
+    if ((m = /^(\s*)(- )?/.exec(text)) && m[0]) { pushTok(out, m[1], "plain"); pushTok(out, m[2] || "", "punct"); i = m[0].length; }
+    var keyed = /^([^\s:#'"{][^:#]*?|"[^"]*"|'[^']*')(\s*:)(?=\s|$)/.exec(text.slice(i));
+    if (keyed) { pushTok(out, keyed[1], "key"); pushTok(out, keyed[2], "punct"); i += keyed[0].length; }
+  }
+  while (i < text.length) {
+    var rest = text.slice(i);
+    if ((m = /^\s+#.*/.exec(rest))) { pushTok(out, m[0], "com"); return; }
+    if ((m = /^'[^']*'?|^"(?:[^"\\]|\\.)*"?/.exec(rest))) { pushTok(out, m[0], "str"); i += m[0].length; continue; }
+    if ((m = /^-?\d+(?:\.\d+)?(?=\s|$|,|\])/.exec(rest))) { pushTok(out, m[0], "num"); i += m[0].length; continue; }
+    if ((m = /^[^\s,\[\]{}]+/.exec(rest))) { pushTok(out, m[0], YAML_WORDS.has(m[0].toLowerCase()) ? "kw" : "plain"); i += m[0].length; continue; }
+    pushTok(out, rest[0], /\s/.test(rest[0]) ? "plain" : "punct"); i++;
+  }
+}
+/* Splits a line into Jinja tags and the text between them, carrying an
+   unclosed tag on to the next line. */
+function codeLineTokens(line, lang, state) {
+  var out = [];
+  if (lang === "text") { pushTok(out, line, "plain"); return out; }
+  if (lang === "sql") { sqlTokens(line, state, out); return out; }
+  var i = 0, first = true;
+  while (i < line.length) {
+    if (state.tag) {
+      var close = state.tag === "{#" ? "#}" : state.tag === "{%" ? "%}" : "}}";
+      var shut = line.indexOf(close, i), inner = line.slice(i, shut < 0 ? line.length : shut);
+      if (state.tag === "{#") pushTok(out, inner, "com"); else jinjaTokens(inner, out);
+      if (shut < 0) return out;
+      pushTok(out, close, state.tag === "{#" ? "com" : "jd");
+      i = shut + 2; state.tag = null; first = false; continue;
+    }
+    var open = line.slice(i).search(/\{\{|\{%|\{#/);
+    var plain = open < 0 ? line.slice(i) : line.slice(i, i + open);
+    if (lang === "yaml") yamlTokens(plain, first, out); else sqlTokens(plain, state, out);
+    if (open < 0) break;
+    i += open;
+    state.tag = line.substr(i, 2);
+    pushTok(out, state.tag, state.tag === "{#" ? "com" : "jd");
+    i += 2; first = false;
+  }
+  return out;
+}
+
+/* Size and spacing of a code block, from its text. */
+function codeMetrics(node) {
+  var size = node.titleSize || 11;
+  var lines = String(node.code || "").replace(/\t/g, "  ").split("\n");
+  measurer = measurer || document.createElement("canvas").getContext("2d");
+  measurer.font = size + "px " + MONO;
+  var cw = measurer.measureText("M").width, longest = 0;
+  lines.forEach(function (l) { longest = Math.max(longest, l.length); });
+  var numbers = node.lineNumbers !== false;
+  var gutter = numbers ? String(lines.length).length * cw + 16 : 0;
+  var lh = size * 1.5, head = 24, pad = 12;
+  return {
+    size: size, lines: lines, cw: cw, gutter: gutter, lh: lh, head: head, pad: pad, numbers: numbers,
+    w: Math.ceil(Math.max(170, gutter + longest * cw + pad * 2)),
+    h: Math.ceil(head + lines.length * lh + pad)
+  };
+}
+/* A code block is as big as its code, or as big as it was dragged to,
+   whichever is larger. */
+function fitCode(node) {
+  if (node.type !== "code") return;
+  var m = codeMetrics(node);
+  node.w = Math.max(m.w, node.minW || 0);
+  node.h = Math.max(m.h, node.minH || 0);
+}
+function drawCodeNode(node) {
+  var shapeGroup = keyedGroup("shapes", node.id, true);
+  var labelGroup = keyedGroup("labels", node.id, false);
+  var random = makeRandom(hashOf(node.id)), jitter = ROUGHNESS[roughness].jitter;
+  var m = codeMetrics(node), corners = cornersFor(node);
+
+  shapeGroup.appendChild(makeEl("path", { d: wobblyPath(corners, jitter * 0.5, random), fill: node.fill, "fill-opacity": 0.95 }));
+  shapeGroup.appendChild(makeEl("path", {
+    d: wobblyPath(cornersFor({ x: node.x, y: node.y, w: node.w, h: m.head }), jitter * 0.4, random),
+    fill: node.accent, "fill-opacity": 0.09
+  }));
+  corners.forEach(function (c, i) {
+    shapeGroup.appendChild(makeEl("path", {
+      d: sidePath(c, corners[(i + 1) % 4], jitter * 0.5, random), fill: "none", stroke: node.accent,
+      "stroke-width": (1.4 + random() * 0.5).toFixed(2), "stroke-opacity": 0.72, "stroke-linecap": "round"
+    }));
+  });
+  shapeGroup.appendChild(makeEl("path", {
+    d: sidePath({ x: node.x, y: node.y + m.head }, { x: node.x + node.w, y: node.y + m.head }, jitter * 0.4, random),
+    fill: "none", stroke: node.accent, "stroke-width": 1.1, "stroke-opacity": 0.45, "stroke-linecap": "round"
+  }));
+
+  var tag = (CODE_LANGS.filter(function (l) { return l[0] === node.lang; })[0] || CODE_LANGS[0])[1];
+  var label = makeEl("text", {
+    x: node.x + m.pad, y: node.y + 16, "font-size": 8.5, "font-weight": 600, fill: node.accent,
+    "letter-spacing": "0.12em", "fill-opacity": 0.9
+  });
+  label.textContent = tag.toUpperCase();
+  labelGroup.appendChild(label);
+
+  var state = {}, top = node.y + m.head + m.pad * 0.5;
+  m.lines.forEach(function (line, i) {
+    var y = top + i * m.lh + m.size * 1.05;
+    if (m.numbers) {
+      var num = makeEl("text", { x: node.x + m.pad + m.gutter - 10, y: y, "font-size": m.size * 0.9, "font-family": MONO, fill: INK_SOFT, "fill-opacity": 0.6, "text-anchor": "end" });
+      num.textContent = String(i + 1);
+      labelGroup.appendChild(num);
+    }
+    var row = makeEl("text", { x: node.x + m.pad + m.gutter, y: y, "font-size": m.size, "font-family": MONO, fill: INK });
+    row.setAttributeNS("http://www.w3.org/XML/1998/namespace", "xml:space", "preserve");
+    row.style.whiteSpace = "pre";
+    codeLineTokens(line, node.lang || "sql", state).forEach(function (tok) {
+      var t = makeEl("tspan", { fill: CODE_INK[tok.kind] || INK });
+      if (tok.kind === "kw" || tok.kind === "jk" || tok.kind === "key") t.setAttribute("font-weight", 600);
+      if (tok.kind === "com") t.setAttribute("font-style", "italic");
+      t.textContent = tok.text;
+      row.appendChild(t);
+    });
+    labelGroup.appendChild(row);
+  });
+
+  var hit = keyedHit(node.id, "rect", "nodeId");
+  setAttrs(hit, { x: node.x, y: node.y, width: node.w, height: node.h, fill: "transparent", cursor: "move" });
+}
+
+function buildCodeBubble(node) {
+  bubble.appendChild(selectControl(CODE_LANGS, node.lang || "sql", "Language", function (v) {
+    patchSelected({ lang: function (it) { return it.type === "code" ? v : undefined; } });
+  }));
+  bubble.appendChild(toolButton({
+    label: "Line numbers", title: "Show or hide line numbers", pressed: node.lineNumbers !== false,
+    onClick: function () { patchSelected({ lineNumbers: function (it) { return it.type === "code" ? it.lineNumbers === false : undefined; } }); }
+  }));
+  bubble.appendChild(divider());
+  bubble.appendChild(paletteRow(null, function (preset) {
+    patchSelected({ fill: function (it) { return it.type === "code" ? preset.fill : undefined; }, accent: function (it) { return it.type === "code" ? preset.accent : undefined; } });
+  }));
+  bubble.appendChild(toolButton({
+    label: "Paper", title: "Back to the plain paper card",
+    onClick: function () { patchSelected({ fill: function (it) { return it.type === "code" ? CODE_PAPER.fill : undefined; }, accent: function (it) { return it.type === "code" ? CODE_PAPER.accent : undefined; } }); }
+  }));
+  bubble.appendChild(colorControl(node.fill, "Card colour", function (hex) { patchSelected({ fill: function (it) { return it.type === "code" ? hex : undefined; } }); }));
+  bubble.appendChild(colorControl(node.accent, "Outline colour", function (hex) { patchSelected({ accent: function (it) { return it.type === "code" ? hex : undefined; } }); }));
+  bubble.appendChild(divider());
+  bubble.appendChild(numberControl(node.titleSize || 11, 7, 28, "Code size", function (v) {
+    patchSelected({ titleSize: function (it) { return it.type === "code" ? v : undefined; } });
+  }, 0.5));
+}
+var CODE_PAPER = { fill: "#F7F4EC", accent: "#5F5D55" };
+
 function drawNode(node) {
   if (node.type === "image") { drawImageNode(node); return; }
+  if (node.type === "code") { drawCodeNode(node); return; }
   if (node.type === "ink") { drawInkNode(node); return; }
   var shapeGroup = keyedGroup("shapes", node.id, true);
   var labelGroup = keyedGroup("labels", node.id, false);
@@ -2579,6 +2797,12 @@ function makeNode(type, style, at, tone) {
     bold: false, italic: false, strike: false, underline: false
   };
   if (type === "table") { node.cells = blankCells(3, 3); node.header = true; syncFills(node); }
+  if (type === "code") {
+    node.lang = "sql"; node.code = "select *\nfrom students\nwhere active"; node.lineNumbers = true;
+    node.fill = CODE_PAPER.fill; node.accent = CODE_PAPER.accent; node.titleSize = 11;
+    fitCode(node);
+    node.x = snap(at.x - node.w / 2); node.y = snap(at.y - node.h / 2);
+  }
   return node;
 }
 
@@ -2988,7 +3212,7 @@ var TEXT_FLAGS = ["bold", "italic", "underline", "strike"];
 
 function kindOf(found) {
   if (found.kind !== "node") return found.kind;
-  return found.item.type === "image" || found.item.type === "ink" || found.item.type === "table" ? found.item.type : "shape";
+  return found.item.type === "image" || found.item.type === "ink" || found.item.type === "table" || found.item.type === "code" ? found.item.type : "shape";
 }
 function styleOf(found) {
   var it = found.item, kind = kindOf(found), st = { kind: kind };
@@ -3001,6 +3225,8 @@ function styleOf(found) {
     st.weight = it.weight; st.dashed = !!it.dashed; st.head = it.head; st.tail = it.tail; st.onPath = it.onPath;
   } else if (kind === "text") {
     st.line = it.color; st.textColor = it.color; st.size = it.size; st.anchor = it.anchor;
+  } else if (kind === "code") {
+    st.line = it.accent; st.fill = it.fill; st.size = it.titleSize;
   } else if (kind === "ink") {
     st.line = it.accent; st.weight = it.weight;
   } else if (kind === "image") {
@@ -3026,6 +3252,9 @@ function applyStyle(found, st) {
   } else if (kind === "text") {
     set("color", st.textColor || st.line);
     if (same) { set("size", st.size); set("anchor", st.anchor); }
+  } else if (kind === "code") {
+    set("accent", st.line); set("fill", st.fill);
+    if (same) set("titleSize", st.size);
   } else if (kind === "ink") {
     set("accent", st.line);
     if (same) set("weight", st.weight);
@@ -3088,13 +3317,14 @@ var TOOLS = [
   { sep: true },
   { id: "text",    icon: "text",    title: "Text",            key: "T" },
   { id: "pen",     icon: "pen",     title: "Draw",            key: "P" },
+  { id: "code",    icon: "code",    title: "Code block",      key: "K" },
   { id: "connect", icon: "connect", title: "Draw an arrow",   key: "C" }
 ];
-var SHORTCUT_TOOLS = { v: "select", h: "pan", b: "box", d: "diamond", s: "sketch", e: "ellipse", g: "table", t: "text", c: "connect", p: "pen" };
+var SHORTCUT_TOOLS = { v: "select", h: "pan", b: "box", d: "diamond", s: "sketch", e: "ellipse", g: "table", t: "text", c: "connect", p: "pen", k: "code" };
 
 function toolShape(id) {
   if (id === "sketch") return { type: "box", style: "sketch" };
-  if (id === "box" || id === "diamond" || id === "ellipse" || id === "pill" || id === "note" || id === "table") {
+  if (id === "box" || id === "diamond" || id === "ellipse" || id === "pill" || id === "note" || id === "table" || id === "code") {
     return { type: id, style: "wash" };
   }
   return null;
@@ -3527,6 +3757,7 @@ function endDrag(event) {
       node = makeNode(d.shape.type, d.shape.style, { x: ghost.x + ghost.w / 2, y: ghost.y + ghost.h / 2 });
       node.x = snap(ghost.x); node.y = snap(ghost.y);
       node.w = Math.max(MIN_W, snap(ghost.w)); node.h = Math.max(MIN_H, snap(ghost.h));
+      if (node.type === "code") { node.minW = node.w; node.minH = node.h; fitCode(node); }
       if (node.type === "table") {
         node.w = Math.max(node.w, node.cells[0].length * MIN_CELL_W);
         node.h = Math.max(node.h, node.cells.length * MIN_CELL_H);
@@ -3564,6 +3795,7 @@ function endDrag(event) {
   if (d.type === "resize") {
     var rt = findNode(d.id);
     if (rt && rt.type === "table" && rt.rowBase && d.box.h) rt.rowBase = rt.rowBase * rt.h / d.box.h;
+    if (rt && rt.type === "code") { rt.minW = rt.w; rt.minH = rt.h; }
   }
   if (d.type === "ink") { finishStroke(d.points); return; }
 
@@ -3642,6 +3874,7 @@ function defaultField(id, point) {
     return cellField(cell.r, cell.c);
   }
   if (f.kind === "node" && (f.item.type === "image" || f.item.type === "ink")) return null;
+  if (f.kind === "node" && f.item.type === "code") return "code";
   return f.kind === "node" ? "title" : f.kind === "text" ? "text" : "label";
 }
 stage.addEventListener("dblclick", function (event) {
@@ -3684,6 +3917,7 @@ function openEditor(id, field) {
 
   var cell = parseCell(field);
   var value = cell ? (found.item.cells[cell.r][cell.c] || "")
+            : field === "code" ? (found.item.code || "")
             : found.kind === "node" ? (field === "sub" ? (found.item.sub || "") : (found.item.title || ""))
             : found.kind === "text" ? found.item.text
             : (found.item.label || "");
@@ -3698,6 +3932,7 @@ function openEditor(id, field) {
   window.requestAnimationFrame(function () {
     if (editing && document.activeElement !== inlineInput) { inlineInput.focus(); inlineInput.select(); }
   });
+  if (field === "code") { setHint("Typing code. Tab indents, Enter starts a new line, Esc or " + MOD + "+Enter finishes."); return; }
   setHint((cell ? "Typing in a cell. Tab moves to the next one, Esc finishes."
     : found.kind === "node" ? "Typing. Tab swaps between the title and the caption, Esc finishes."
     : "Typing. Esc finishes.") + " Select words and press " + MOD + "+B, I, U or E (code) to format just them.");
@@ -3718,6 +3953,12 @@ function layoutEditor() {
       x: cb.x + cb.w / 2, y: at.align.v === "m" ? cb.y + cb.h / 2 : at.y - size * 0.35,
       width: Math.max(cb.w - 8, 40), size: size, textAlign: at.align.h === "l" ? "left" : at.align.h === "r" ? "right" : "center",
       lines: shownLines
+    };
+  } else if (editing.field === "code") {
+    var cn = found.item, cm = codeMetrics(cn), codeW = cn.w - cm.pad * 2 - cm.gutter;
+    spot = {
+      x: cn.x + cm.pad + cm.gutter + codeW / 2, y: cn.y + cm.head + (cn.h - cm.head) / 2,
+      width: codeW + 10, size: cm.size, textAlign: "left", mono: true, lines: cm.lines.length, lineHeight: 1.5
     };
   } else if (found.kind === "node") {
     var n = found.item, mid = center(n);
@@ -3745,13 +3986,18 @@ function layoutEditor() {
   inlineInput.style.top = place.y + "px";
   inlineInput.style.width = Math.max(spot.width * k, 80) + "px";
   inlineInput.style.fontSize = fontPx + "px";
-  inlineInput.style.height = (lines * fontPx * 1.3 + 10) + "px";
-  inlineInput.style.fontWeight = found.item.bold ? 700 : 500;
-  inlineInput.style.fontStyle = found.item.italic ? "italic" : "normal";
+  var lineGap = spot.lineHeight || 1.3;
+  inlineInput.style.height = (lines * fontPx * lineGap + 10) + "px";
+  inlineInput.style.fontWeight = spot.mono ? 400 : found.item.bold ? 700 : 500;
+  inlineInput.style.fontStyle = !spot.mono && found.item.italic ? "italic" : "normal";
   inlineInput.style.textAlign = spot.textAlign || "";
+  inlineInput.style.fontFamily = spot.mono ? MONO : "";
+  inlineInput.style.lineHeight = spot.mono ? String(lineGap) : "";
+  if (spot.mono) inlineInput.setAttribute("wrap", "off"); else inlineInput.removeAttribute("wrap");
 
-  /* the format strip sits just above the box, inside the sheet */
-  fmtStrip.hidden = false;
+  /* the format strip sits just above the box, inside the sheet; code
+     has no word formatting, so it goes without */
+  fmtStrip.hidden = !!spot.mono;
   var strip = fmtStrip.getBoundingClientRect(), sheetBox = sheet.getBoundingClientRect();
   var boxH = lines * fontPx * 1.3 + 10;
   fmtStrip.style.left = clamp(place.x - strip.width / 2, 8, sheetBox.width - strip.width - 8) + "px";
@@ -3767,6 +4013,9 @@ function applyEditor() {
   if (cell) {
     found.item.cells[cell.r][cell.c] = value;
     fitTableRows(found.item);   /* the row grows while you type */
+  } else if (editing.field === "code") {
+    found.item.code = value;
+    fitCode(found.item);   /* the card grows while you type */
   } else if (found.kind === "node") {
     if (editing.field === "sub") found.item.sub = value; else found.item.title = value;
   } else if (found.kind === "text") {
@@ -3836,6 +4085,19 @@ FORMAT_KEYS.forEach(function (f) {
 
 inlineInput.addEventListener("keydown", function (event) {
   event.stopPropagation();
+  /* in a code block Tab indents and Enter starts a new line */
+  if (editing && editing.field === "code") {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      var a = inlineInput.selectionStart, b = inlineInput.selectionEnd, v = inlineInput.value;
+      inlineInput.value = v.slice(0, a) + "  " + v.slice(b);
+      inlineInput.setSelectionRange(a + 2, a + 2);
+      applyEditor();
+      return;
+    }
+    if (event.key === "Escape" || (event.key === "Enter" && (event.metaKey || event.ctrlKey))) { event.preventDefault(); closeEditor(); }
+    return;
+  }
   if ((event.metaKey || event.ctrlKey) && !event.altKey) {
     var key = event.key.toLowerCase();
     var mark = key === "b" ? "**" : key === "i" ? "*" : key === "u" ? "++" : key === "e" || key === "`" ? "`" :
@@ -4135,7 +4397,7 @@ function formatToggles(getItems) {
    ================================================================ */
 /* Shapes are the boxes, diamonds, ellipses, pills, notes and tables:
    the things with a fill, an outline and a title. */
-function isShape(node) { return node.type !== "image" && node.type !== "ink"; }
+function isShape(node) { return node.type !== "image" && node.type !== "ink" && node.type !== "code"; }
 function selectedShapes() { return selNodes().filter(isShape); }
 /* Wraps a patch so it only lands on selected shapes. */
 function onlyShapes(patch) {
@@ -4474,6 +4736,7 @@ function renderBubble() {
     var found = list[0];
     if (found.kind === "node" && found.item.type === "image") buildImageBubble(found.item);
     else if (found.kind === "node" && found.item.type === "ink") buildInkBubble(found.item);
+    else if (found.kind === "node" && found.item.type === "code") buildCodeBubble(found.item);
     else if (found.kind === "node") buildNodeBubble(found.item);
     else if (found.kind === "edge") buildEdgeBubble(found.item);
     else buildTextBubble(found.item);
@@ -4544,6 +4807,11 @@ function stencilPreview(kind) {
       d: wobblyPath(corners, 1.5, random), fill: "currentColor", "fill-opacity": 0.12,
       stroke: "currentColor", "stroke-width": 1.4, "stroke-linecap": "round"
     }));
+  }
+  if (kind.type === "code") {
+    [[12, 13, 22, CODE_INK.kw], [12, 18, 34, CODE_INK.fn], [16, 23, 26, CODE_INK.str]].forEach(function (l) {
+      svg.appendChild(makeEl("path", { d: "M" + l[0] + "," + l[1] + " H" + (l[0] + l[2]), stroke: l[3], "stroke-width": 1.8, "stroke-linecap": "round" }));
+    });
   }
   if (kind.type === "table") {
     [[{ x: 6, y: 12 }, { x: 50, y: 12 }], [{ x: 6, y: 19.5 }, { x: 50, y: 19.5 }],
@@ -5026,6 +5294,10 @@ function itemName(id) {
   }
   if (it.type === "image") return { label: "Image", icon: "image", dim: true };
   if (it.type === "ink") return { label: "Drawing", icon: "pen", dim: true };
+  if (it.type === "code") {
+    var firstLine = String(it.code || "").split("\n").filter(function (l) { return l.trim(); })[0];
+    return { label: firstLine ? "Code: " + firstLine.trim() : "Code", icon: "code", dim: !firstLine };
+  }
   if (it.type === "table") {
     var first = [].concat.apply([], it.cells).filter(Boolean)[0];
     return { label: first ? "Table: " + plainText(first).split("\n")[0] : "Table", icon: "table", dim: !first };
@@ -5827,7 +6099,7 @@ function showShortcuts() {
     m.appendChild(htmlEl("p", "sub", "These all work while the sheet has focus."));
     var keys = htmlEl("div", "keys");
     [["V  H", "Select, pan"], ["B  D  S  E", "Box, diamond, inked, ellipse"], ["G", "Table"],
-     ["T", "Text"], ["C", "Draw an arrow"], ["P", "Pen: draw freehand"], ["I", "Import an image"], ["O", "Show or hide the reveal order"],
+     ["T", "Text"], ["C", "Draw an arrow"], ["P", "Pen: draw freehand"], ["K", "Code block"], ["I", "Import an image"], ["O", "Show or hide the reveal order"],
      [MOD + " + V", "Paste shapes, or a picture you copied"],
      ["Double click", "Type on a shape, arrow or label"], ["Enter", "Edit whatever is selected"],
      ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
