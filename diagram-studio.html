@@ -613,6 +613,7 @@ var ICONS = {
   table: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="13" height="11" rx="1.5"/><path d="M2.5 7.2 H15.5 M2.5 10.9 H15.5 M7 3.5 V14.5 M11.2 3.5 V14.5" stroke-width="1.1"/></g>',
   merge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M5.5 9 H12.5 M10.5 7 L12.5 9 L10.5 11 M7.5 7 L5.5 9 L7.5 11"/></g>',
   unmerge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M9 4 V14" stroke-dasharray="1.6 1.8"/><path d="M7 9 H4.5 M5.8 7.6 L4.4 9 L5.8 10.4 M11 9 H13.5 M12.2 7.6 L13.6 9 L12.2 10.4"/></g>',
+  wrap: '<g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5 H15"/><path d="M3 9 H12.5 a2.25 2.25 0 0 1 0 4.5 H9"/><path d="M10.6 11.9 L9 13.5 L10.6 15.1"/><path d="M3 13.5 H6"/></g>',
   vTop: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 3.5 H15"/><path d="M6 7 H12 M6 10 H12"/></g>',
   vMid: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 9 H4.5 M13.5 9 H15" opacity=".5"/><path d="M6 7.5 H12 M6 10.5 H12"/></g>',
   vBot: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 14.5 H15"/><path d="M6 8 H12 M6 11 H12"/></g>',
@@ -769,6 +770,7 @@ var past = [], future = [], snapshot = null;
 function stateJSON() { return JSON.stringify({ title: doc.title, pages: doc.pages, active: doc.active }); }
 
 function commit() {
+  fitAllTables();
   if (snapshot) { past.push(snapshot); if (past.length > 150) past.shift(); }
   future.length = 0;
   snapshot = stateJSON();
@@ -1129,13 +1131,85 @@ function syncFills(node) {
      across (l, c, r) then down (t, m, b), or null for centred. */
   var was = Array.isArray(node.aligns) ? node.aligns : [];
   node.aligns = node.cells.map(function (row, r) {
-    return row.map(function (_, c) { var a = was[r] && was[r][c]; return /^[lcr][tmb]$/.test(a || "") ? a : null; });
+    return row.map(function (_, c) { var a = was[r] && was[r][c]; return /^[lcr][tmb]w?$/.test(a || "") ? a : null; });
   });
 }
 function cellAlign(node, r, c) {
   var a = node.aligns && node.aligns[r] && node.aligns[r][c];
-  return { h: a ? a[0] : "c", v: a ? a[1] : "m" };
+  return { h: a ? a[0] : "c", v: a ? a[1] : "m", wrap: !!a && a[2] === "w" };
 }
+function alignCode(al) { return al.h === "c" && al.v === "m" && !al.wrap ? null : al.h + al.v + (al.wrap ? "w" : ""); }
+
+/* Wrapping measures words with the same font the sheet draws in. */
+var measurer = null;
+function textWidth(str, size, weight, italic) {
+  measurer = measurer || document.createElement("canvas").getContext("2d");
+  measurer.font = (italic ? "italic " : "") + weight + " " + size + "px Poppins, system-ui, sans-serif";
+  return measurer.measureText(str).width;
+}
+/* Breaks text into lines no wider than width, keeping the user's own
+   line breaks; a word too long for a line is split by letters. */
+function wrapLines(text, width, size, weight, italic) {
+  var out = [];
+  String(text || "").split("\n").forEach(function (para) {
+    var line = "";
+    para.split(/\s+/).filter(Boolean).forEach(function (word) {
+      var trial = line ? line + " " + word : word;
+      if (textWidth(trial, size, weight, italic) <= width || !line) {
+        line = trial;
+      } else {
+        out.push(line);
+        line = word;
+      }
+      while (textWidth(line, size, weight, italic) > width && line.length > 1) {
+        var cut = line.length - 1;
+        while (cut > 1 && textWidth(line.slice(0, cut), size, weight, italic) > width) cut--;
+        out.push(line.slice(0, cut));
+        line = line.slice(cut);
+      }
+    });
+    out.push(line);
+  });
+  return out;
+}
+function cellWeight(node, r) { return node.bold ? 700 : node.header && r === 0 && node.cells.length > 1 ? 600 : 500; }
+/* The text a cell shows: wrapped to its width when wrapping is on. */
+function shownCellText(node, r, c) {
+  var text = node.cells[r][c];
+  if (!text || !cellAlign(node, r, c).wrap) return text;
+  var size = node.titleSize || 11.5, box = cellBox(node, r, c);
+  return wrapLines(text, Math.max(10, box.w - CELL_PAD * 2), size, cellWeight(node, r), node.italic).join("\n");
+}
+/* Grows each row to fit its wrapped cells, and lets it shrink back to the
+   table's usual row height (rowBase) when the text gets shorter. Runs
+   before every saved change, so rows follow edits, column resizes and
+   font sizes. Cells merged across rows keep the height they have. */
+function fitTableRows(n) {
+  if (n.type !== "table" || !n.cells) return;
+  var wraps = n.aligns && n.aligns.some(function (row) { return row.some(function (a) { return a && a[2] === "w"; }); });
+  if (!wraps && !n.rowH) return;
+  var rows = n.cells.length, base = n.rowBase || n.h / rows, size = n.titleSize || 11.5;
+  var need = n.cells.map(function () { return base; });
+  if (wraps) {
+    n.cells.forEach(function (row, r) {
+      row.forEach(function (text, c) {
+        var m = mergeAt(n, r, c);
+        if (!text || isCovered(n, r, c) || (m && m.rs > 1) || !cellAlign(n, r, c).wrap) return;
+        var lines = shownCellText(n, r, c).split("\n").length;
+        need[r] = Math.max(need[r], Math.ceil(lines * size * 1.25 + CELL_PAD * 2));
+      });
+    });
+  }
+  if (need.every(function (h) { return h === base; })) {
+    delete n.rowH; delete n.rowBase;
+    n.h = Math.round(base * rows);
+    return;
+  }
+  n.rowBase = base;
+  n.rowH = need;
+  n.h = need.reduce(function (a, b) { return a + b; }, 0);
+}
+function fitAllTables() { nodes().forEach(fitTableRows); }
 /* Where a cell's text sits. Several lines stay a block, so top and bottom
    move the whole block rather than its middle line. */
 var CELL_PAD = 6;
@@ -1196,9 +1270,29 @@ function trimMerges(node) {
   });
   if (!node.merges.length) delete node.merges;
 }
+/* Rows are even unless rowH holds their heights, which happens once
+   wrapped text needs a row to grow. They scale with the table like
+   column widths do. */
+function rowHeights(node) {
+  var rows = node.cells.length, hs = node.rowH;
+  var usable = Array.isArray(hs) && hs.length === rows && hs.every(function (v) { return v > 0; });
+  if (!usable) return node.cells.map(function () { return node.h / rows; });
+  var sum = hs.reduce(function (a, b) { return a + b; }, 0);
+  return hs.map(function (v) { return node.h * v / sum; });
+}
+function rowEdges(node) {
+  var ys = [node.y];
+  rowHeights(node).forEach(function (h) { ys.push(ys[ys.length - 1] + h); });
+  return ys;
+}
+function rowAt(node, y) {
+  var ys = rowEdges(node), r = 0;
+  while (r < node.cells.length - 1 && y >= ys[r + 1]) r++;
+  return r;
+}
 function rawCellBox(node, r, c) {
-  var t = tableSize(node), xs = colEdges(node);
-  return { x: xs[c], y: node.y + r * t.ch, w: xs[c + 1] - xs[c], h: t.ch };
+  var xs = colEdges(node), ys = rowEdges(node);
+  return { x: xs[c], y: ys[r], w: xs[c + 1] - xs[c], h: ys[r + 1] - ys[r] };
 }
 /* The box a cell shows in: its own, or the whole region it is merged into. */
 function cellBox(node, r, c) {
@@ -1211,7 +1305,7 @@ function cellBox(node, r, c) {
 function cellAt(node, point) {
   var t = tableSize(node), xs = colEdges(node), c = 0;
   while (c < t.cols - 1 && point.x >= xs[c + 1]) c++;
-  var r = clamp(Math.floor((point.y - node.y) / t.ch), 0, t.rows - 1);
+  var r = rowAt(node, point.y);
   var m = mergeAt(node, r, c);
   return m ? { r: m.r, c: m.c } : { r: r, c: c };
 }
@@ -1229,8 +1323,8 @@ function parseCell(field) {
 function anchorPoint(node, side, row) {
   var mid = center(node);
   if (row != null && node.type === "table" && (side === "left" || side === "right")) {
-    var y = node.y + (row + 0.5) * tableSize(node).ch;
-    return { x: side === "left" ? node.x : node.x + node.w, y: y };
+    var ys = rowEdges(node);
+    return { x: side === "left" ? node.x : node.x + node.w, y: (ys[row] + ys[row + 1]) / 2 };
   }
   if (side === "top")    return { x: mid.x, y: node.y };
   if (side === "bottom") return { x: mid.x, y: node.y + node.h };
@@ -1772,8 +1866,9 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
     }
     return out;
   }
+  var ys = rowEdges(node);
   for (r = 1; r < t.rows; r++) {
-    var y = node.y + r * t.ch;
+    var y = ys[r];
     var strong = node.header && r === 1;
     runs(t.cols, function (col) { return !blocked(r - 1, r, col, col); }).forEach(function (run) {
       shapeGroup.appendChild(makeEl("path", Object.assign({
@@ -1786,7 +1881,7 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
     var x = xs[c];
     runs(t.rows, function (row) { return !blocked(row, row, c - 1, c); }).forEach(function (run) {
       shapeGroup.appendChild(makeEl("path", Object.assign({
-        d: sidePath({ x: x, y: node.y + run[0] * t.ch }, { x: x, y: node.y + (run[1] + 1) * t.ch }, jitter * 0.5, random),
+        d: sidePath({ x: x, y: ys[run[0]] }, { x: x, y: ys[run[1] + 1] }, jitter * 0.5, random),
         "stroke-width": 1.2, "stroke-opacity": 0.6
       }, ink)));
     });
@@ -1794,8 +1889,8 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
 
   for (r = 0; r < t.rows; r++) {
     for (c = 0; c < t.cols; c++) {
-      var text = node.cells[r][c];
-      if (!text || isCovered(node, r, c)) continue;
+      if (!node.cells[r][c] || isCovered(node, r, c)) continue;
+      var text = shownCellText(node, r, c);
       var spot = cellTextSpot(node, r, c, text, format.size);
       var cellFormat = Object.assign({}, format, { anchor: spot.anchor });
       if (node.header && r === 0 && t.rows > 1) cellFormat.weight = 600;
@@ -1980,8 +2075,8 @@ function alignCells(part, code) {
     if (!n.aligns) syncFills(n);
     function set(r, c) {
       var al = cellAlign(n, r, c);
-      if (part === "h") al.h = code; else al.v = code;
-      n.aligns[r][c] = al.h === "c" && al.v === "m" ? null : al.h + al.v;
+      if (part === "h") al.h = code; else if (part === "v") al.v = code; else al.wrap = code;
+      n.aligns[r][c] = alignCode(al);
     }
     if (cur) eachPickedCell(cur, set);
     else n.cells.forEach(function (row, r) { row.forEach(function (_, c) { set(r, c); }); });
@@ -2009,6 +2104,17 @@ function alignButton(node) {
         { label: "Bottom", icon: "vBot", on: all("v", "b"), run: function () { alignCells("v", "b"); } }
       ]);
     }
+  });
+}
+function wrapButton(node) {
+  var cur = currentCell(), cells = [];
+  if (cur) eachPickedCell(cur, function (r, c) { if (!isCovered(node, r, c)) cells.push(cellAlign(node, r, c)); });
+  else node.cells.forEach(function (row, r) { row.forEach(function (_, c) { if (!isCovered(node, r, c)) cells.push(cellAlign(node, r, c)); }); });
+  var on = cells.length > 0 && cells.every(function (a) { return a.wrap; });
+  return toolButton({
+    icon: "wrap", label: "Wrap", pressed: on,
+    title: on ? "Stop wrapping: keep each line on one line" : (cur ? "Wrap long text in these cells, growing the row" : "Wrap long text in every cell, growing rows to fit"),
+    onClick: function () { alignCells("w", !on); }
   });
 }
 function mergePicked() {
@@ -2349,7 +2455,9 @@ function addTableRow(node, at) {
   node.cells.splice(r, 0, node.cells[0].map(function () { return ""; }));
   node.fills.splice(r, 0, node.cells[0].map(function () { return null; }));
   node.aligns.splice(r, 0, node.cells[0].map(function () { return null; }));
-  node.h = Math.round(node.h + t.ch);
+  var fresh = node.rowBase || node.h / t.rows;
+  if (node.rowH) { var hs = rowHeights(node); hs.splice(r, 0, fresh); node.rowH = hs.map(Math.round); }
+  node.h = Math.round(node.h + fresh);
 }
 function addTableCol(node, at) {
   if (!node.aligns) syncFills(node);
@@ -2396,8 +2504,10 @@ function deleteTableSpan(n, axis, a0, a1) {
   });
   if (axis === "r") {
     shiftEdgeRows(n.id, function (r) { return r < a0 ? r : r > a1 ? r - count : null; });
+    var hs = rowHeights(n), lost = hs.splice(a0, count).reduce(function (a, b) { return a + b; }, 0);
     n.cells.splice(a0, count); n.fills.splice(a0, count); n.aligns.splice(a0, count);
-    n.h = Math.max(MIN_H, Math.round(n.h - count * t.ch));
+    if (n.rowH) n.rowH = hs.map(Math.round);
+    n.h = Math.max(MIN_H, Math.round(n.h - lost));
   } else {
     var ws = colWidths(n), gone = ws.splice(a0, count).reduce(function (a, b) { return a + b; }, 0);
     [n.cells, n.fills, n.aligns].forEach(function (grid) { grid.forEach(function (row) { row.splice(a0, count); }); });
@@ -2909,8 +3019,7 @@ function attachAt(node, point) {
                top: Math.abs(point.y - node.y), bottom: Math.abs(point.y - node.y - node.h) };
   var side = Object.keys(gaps).sort(function (a, b) { return gaps[a] - gaps[b]; })[0];
   if (side === "top" || side === "bottom") return { side: side, row: null };
-  var row = clamp(Math.floor((point.y - node.y) / tableSize(node).ch), 0, node.cells.length - 1);
-  return { side: side, row: row };
+  return { side: side, row: rowAt(node, point.y) };
 }
 function nearestSide(node, point) {
   var best = "top", bd = Infinity;
@@ -3315,6 +3424,10 @@ function endDrag(event) {
   if (d.type === "marquee") { render(); return; }
   if (d.type === "move" && !d.moved) { render(); return; }
   if (d.type === "col" && !d.moved) { render(); return; }
+  if (d.type === "resize") {
+    var rt = findNode(d.id);
+    if (rt && rt.type === "table" && rt.rowBase && d.box.h) rt.rowBase = rt.rowBase * rt.h / d.box.h;
+  }
   if (d.type === "ink") { finishStroke(d.points); return; }
 
   commit();
@@ -3462,10 +3575,12 @@ function layoutEditor() {
 
   if (cell) {
     var size = found.item.titleSize || 11.5;
-    var at = cellTextSpot(found.item, cell.r, cell.c, inlineInput.value, size), cb = at.box;
+    var shown = cellAlign(found.item, cell.r, cell.c).wrap ? shownCellText(found.item, cell.r, cell.c) : inlineInput.value;
+    var at = cellTextSpot(found.item, cell.r, cell.c, shown, size), cb = at.box;
     spot = {
       x: cb.x + cb.w / 2, y: at.align.v === "m" ? cb.y + cb.h / 2 : at.y - size * 0.35,
-      width: Math.max(cb.w - 8, 40), size: size, textAlign: at.align.h === "l" ? "left" : at.align.h === "r" ? "right" : "center"
+      width: Math.max(cb.w - 8, 40), size: size, textAlign: at.align.h === "l" ? "left" : at.align.h === "r" ? "right" : "center",
+      lines: String(shown || "").split("\n").length
     };
   } else if (found.kind === "node") {
     var n = found.item, mid = center(n);
@@ -3487,7 +3602,7 @@ function layoutEditor() {
   }
 
   var place = toScreen(spot.x, spot.y);
-  var lines = inlineInput.value.split("\n").length;
+  var lines = (spot.lines || inlineInput.value.split("\n").length);
   var fontPx = Math.max(12, spot.size * k);
   inlineInput.style.left = place.x + "px";
   inlineInput.style.top = place.y + "px";
@@ -3507,6 +3622,7 @@ function applyEditor() {
   var cell = parseCell(editing.field);
   if (cell) {
     found.item.cells[cell.r][cell.c] = value;
+    fitTableRows(found.item);   /* the row grows while you type */
   } else if (found.kind === "node") {
     if (editing.field === "sub") found.item.sub = value; else found.item.title = value;
   } else if (found.kind === "text") {
@@ -3942,6 +4058,7 @@ function buildNodeBubble(node) {
     }
     bubble.appendChild(divider());
     bubble.appendChild(alignButton(node));
+    bubble.appendChild(wrapButton(node));
     if (!evenColumns(node)) {
       bubble.appendChild(toolButton({
         label: "Even columns", title: "Make every column the same width",
@@ -5728,6 +5845,14 @@ function loadSample() {
 /* ================================================================
    29. Boot
    ================================================================ */
+/* Wrapped text is measured with Poppins; once it has loaded, redraw so
+   lines break where the real font says. */
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () {
+  fitAllTables();
+  if (!editing) snapshot = stateJSON();   /* the refit is where undo starts, not a change */
+  resetDom(); render();
+});
+
 var loaded = loadPersisted();
 loadColorBook();
 
