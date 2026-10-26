@@ -4960,6 +4960,7 @@ function fileMenu() {
     { label: "PNG  ·  3×", icon: "image", run: function () { exportPng(3); } },
     { label: "SVG", icon: "code", run: exportSvg },
     { label: "GIF…", icon: "play", run: showGifExport },
+    { label: "Video (MP4)…", icon: "play", run: showVideoExport },
     { label: "Standalone web page", icon: "code", run: exportHtml },
     "-",
     { label: "Load the sample", icon: "eye", run: function () { loadSample(); toast("Sample loaded"); } },
@@ -5993,6 +5994,243 @@ function showGifExport() {
   });
 }
 
+/* ================================================================
+   24c. Video export
+        Frames are drawn like the GIF's, encoded to H.264 by the
+        browser (WebCodecs) and packed into an MP4 here, so the file
+        stays self-contained. Timing follows Play exactly, with the
+        200ms fade drawn smoothly at 30 frames a second.
+   ================================================================ */
+var VIDEO_FPS = 30, VIDEO_FADE = 200, VIDEO_LEAD = 500, VIDEO_HOLD = 2500, VIDEO_MAX = 1920;
+var videoOptions = { scale: 1 };
+var videoJob = null;
+
+/* When each item appears and goes, in ms from the start of the video. */
+function videoTimeline() {
+  var plan = revealSteps(), step = parseInt($("speed").value, 10) || 700;
+  var at = 0, times = {};
+  plan.steps.forEach(function (st, i) {
+    at += (i ? step : 0) + plan.pauses[i] * 1000;
+    st.forEach(function (e) {
+      var t = times[e.id] || (times[e.id] = { show: null, hide: null });
+      if (e.hide) t.hide = VIDEO_LEAD + at; else t.show = VIDEO_LEAD + at;
+    });
+  });
+  return { times: times, duration: VIDEO_LEAD + at + VIDEO_FADE + VIDEO_HOLD + plan.endPause * 1000 };
+}
+function easeFade(x) { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); }
+function videoOpacity(times, key, ms) {
+  var t = times[key];
+  if (!t) return 1;
+  var shown = t.show === null ? 1 : easeFade((ms - t.show) / VIDEO_FADE);
+  var gone = t.hide === null ? 0 : easeFade((ms - t.hide) / VIDEO_FADE);
+  return Math.round(Math.max(0, shown - gone) * 100) / 100;
+}
+
+/* The smallest H.264 profile and level this size needs that the browser
+   can encode. */
+function pickVideoCodec(w, h, done) {
+  if (typeof VideoEncoder === "undefined") { done(null); return; }
+  var blocks = Math.ceil(w / 16) * Math.ceil(h / 16);
+  var levels = blocks <= 3600 ? ["1F", "28", "33"] : blocks <= 8192 ? ["28", "33"] : ["33"];
+  var tries = [];
+  levels.forEach(function (lv) { ["6400", "4D00", "42E0"].forEach(function (pr) { tries.push("avc1." + pr + lv); }); });
+  (function next(i) {
+    if (i >= tries.length) { done(null); return; }
+    var config = videoConfig(tries[i], w, h);
+    VideoEncoder.isConfigSupported(config).then(function (r) {
+      if (r.supported) done(config); else next(i + 1);
+    }, function () { next(i + 1); });
+  })(0);
+}
+function videoConfig(codec, w, h) {
+  return {
+    codec: codec, width: w, height: h, framerate: VIDEO_FPS,
+    bitrate: clamp(Math.round(w * h * VIDEO_FPS * 0.15), 1500000, 12000000),
+    avc: { format: "avc" }, latencyMode: "quality"
+  };
+}
+
+/* ---- MP4 packing: one H.264 track, all samples in one chunk, with the
+   index (moov) ahead of the data so players can start straight away. */
+function mp4Bytes(parts) {
+  var size = 0;
+  parts.forEach(function (p) { size += p.length; });
+  var out = new Uint8Array(size), at = 0;
+  parts.forEach(function (p) { out.set(p, at); at += p.length; });
+  return out;
+}
+function u32(v) { return new Uint8Array([(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255]); }
+function u16(v) { return new Uint8Array([(v >>> 8) & 255, v & 255]); }
+function fourcc(t) { return new Uint8Array([t.charCodeAt(0), t.charCodeAt(1), t.charCodeAt(2), t.charCodeAt(3)]); }
+function mp4Box(type) {
+  var parts = Array.prototype.slice.call(arguments, 1), body = mp4Bytes(parts);
+  return mp4Bytes([u32(body.length + 8), fourcc(type), body]);
+}
+function mp4Full(type, version, flags) {
+  var parts = Array.prototype.slice.call(arguments, 3);
+  return mp4Box.apply(null, [type, new Uint8Array([version, (flags >> 16) & 255, (flags >> 8) & 255, flags & 255])].concat(parts));
+}
+var MP4_MATRIX = mp4Bytes([u32(0x00010000), u32(0), u32(0), u32(0), u32(0x00010000), u32(0), u32(0), u32(0), u32(0x40000000)]);
+function buildMp4(samples, avcC, w, h) {
+  var timescale = VIDEO_FPS * 1000, delta = 1000, count = samples.length;
+  var mediaDur = count * delta, ms = Math.round(count * 1000 / VIDEO_FPS);
+  var keys = [], sizes = [];
+  samples.forEach(function (smp, i) { if (smp.key) keys.push(u32(i + 1)); sizes.push(u32(smp.data.length)); });
+  function moov(offset) {
+    var entry = mp4Box("avc1",
+      new Uint8Array(6), u16(1), u16(0), u16(0), new Uint8Array(12), u16(w), u16(h),
+      u32(0x00480000), u32(0x00480000), u32(0), u16(1), new Uint8Array(32), u16(0x0018), u16(0xFFFF),
+      mp4Box("avcC", avcC));
+    var stbl = mp4Box("stbl",
+      mp4Full("stsd", 0, 0, u32(1), entry),
+      mp4Full("stts", 0, 0, u32(1), u32(count), u32(delta)),
+      mp4Full("stss", 0, 0, u32(keys.length), mp4Bytes(keys)),
+      mp4Full("stsc", 0, 0, u32(1), u32(1), u32(count), u32(1)),
+      mp4Full("stsz", 0, 0, u32(0), u32(count), mp4Bytes(sizes)),
+      mp4Full("stco", 0, 0, u32(1), u32(offset)));
+    var minf = mp4Box("minf",
+      mp4Full("vmhd", 0, 1, u16(0), u16(0), u16(0), u16(0)),
+      mp4Box("dinf", mp4Full("dref", 0, 0, u32(1), mp4Full("url ", 0, 1))),
+      stbl);
+    var mdia = mp4Box("mdia",
+      mp4Full("mdhd", 0, 0, u32(0), u32(0), u32(timescale), u32(mediaDur), u16(0x55C4), u16(0)),
+      mp4Full("hdlr", 0, 0, u32(0), fourcc("vide"), new Uint8Array(12), new Uint8Array([86, 105, 100, 101, 111, 0])),
+      minf);
+    var tkhd = mp4Full("tkhd", 0, 3, u32(0), u32(0), u32(1), u32(0), u32(ms), new Uint8Array(8),
+      u16(0), u16(0), u16(0), u16(0), MP4_MATRIX, u32(w * 65536), u32(h * 65536));
+    var mvhd = mp4Full("mvhd", 0, 0, u32(0), u32(0), u32(1000), u32(ms), u32(0x00010000), u16(0x0100),
+      new Uint8Array(10), MP4_MATRIX, new Uint8Array(24), u32(2));
+    return mp4Box("moov", mvhd, mp4Box("trak", tkhd, mdia));
+  }
+  var ftyp = mp4Box("ftyp", fourcc("isom"), u32(0x200), fourcc("isom"), fourcc("iso2"), fourcc("avc1"), fourcc("mp41"));
+  var dataSize = 0;
+  samples.forEach(function (smp) { dataSize += smp.data.length; });
+  var head = moov(0);
+  var offset = ftyp.length + head.length + 8;
+  return new Blob([ftyp, moov(offset), u32(dataSize + 8), fourcc("mdat")].concat(samples.map(function (smp) { return smp.data; })), { type: "video/mp4" });
+}
+
+function exportVideo(opts, onProgress, onDone, onFail) {
+  stopReveal();
+  sel.clear(); closeEditor(true); render();
+  var box = exportBox(), scale = opts.scale;
+  if (Math.max(box.w, box.h) * scale > VIDEO_MAX) scale = VIDEO_MAX / Math.max(box.w, box.h);
+  var w = Math.max(2, Math.floor(box.w * scale / 2) * 2), h = Math.max(2, Math.floor(box.h * scale / 2) * 2);
+  var plan = videoTimeline(), total = Math.ceil(plan.duration / 1000 * VIDEO_FPS);
+  var job = { cancelled: false };
+  var canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  var g = canvas.getContext("2d");
+
+  pickVideoCodec(w, h, function (config) {
+    if (job.cancelled) return;
+    if (!config) { onFail("codec"); return; }
+    var samples = [], avcC = null, failed = false;
+    var encoder = new VideoEncoder({
+      output: function (chunk, meta) {
+        if (meta && meta.decoderConfig && meta.decoderConfig.description && !avcC) {
+          var desc = meta.decoderConfig.description;
+          avcC = desc instanceof ArrayBuffer ? new Uint8Array(desc.slice(0)) : new Uint8Array(desc.buffer.slice(desc.byteOffset, desc.byteOffset + desc.byteLength));
+        }
+        var data = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(data);
+        samples.push({ data: data, key: chunk.type === "key" });
+      },
+      error: function () { failed = true; onFail("encode"); }
+    });
+    encoder.configure(config);
+    var frame = 0, lastLook = null;
+    function draw(ms, then) {
+      /* only redraw when something on screen has changed */
+      var look = Object.keys(plan.times).map(function (k) { return videoOpacity(plan.times, k, ms); }).join(",");
+      if (look === lastLook) { then(); return; }
+      lastLook = look;
+      var svg = buildSvgString(true, { box: box, opacityOf: function (key) { return videoOpacity(plan.times, key, ms); } });
+      var url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
+      var image = new Image();
+      image.onload = function () {
+        g.fillStyle = "#FFFFFF"; g.fillRect(0, 0, w, h);
+        g.drawImage(image, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        then();
+      };
+      image.onerror = function () { URL.revokeObjectURL(url); onFail("draw"); };
+      image.src = url;
+    }
+    (function next() {
+      if (job.cancelled || failed) { try { encoder.close(); } catch (e) { /* already closed */ } return; }
+      if (frame >= total) {
+        encoder.flush().then(function () {
+          encoder.close();
+          if (!avcC || !samples.length) { onFail("encode"); return; }
+          onDone(buildMp4(samples, avcC, w, h), { w: w, h: h, seconds: total / VIDEO_FPS });
+        }, function () { onFail("encode"); });
+        return;
+      }
+      /* keep the encoder's queue short so memory stays flat */
+      if (encoder.encodeQueueSize > 8) { setTimeout(next, 5); return; }
+      onProgress(frame, total);
+      draw(frame * 1000 / VIDEO_FPS, function () {
+        var vf = new VideoFrame(canvas, { timestamp: Math.round(frame * 1e6 / VIDEO_FPS), duration: Math.round(1e6 / VIDEO_FPS) });
+        encoder.encode(vf, { keyFrame: frame % (VIDEO_FPS * 2) === 0 });
+        vf.close();
+        frame++;
+        setTimeout(next, 0);
+      });
+    })();
+  });
+  return job;
+}
+
+function showVideoExport() {
+  closeMenus();
+  openModal(function (m) {
+    var o = videoOptions;
+    var plan = videoTimeline();
+    m.appendChild(htmlEl("h2", null, "Export a video"));
+    var speedName = $("speed").options[$("speed").selectedIndex].text.toLowerCase();
+    m.appendChild(htmlEl("p", "sub", "An MP4 of the reveal, the same as Play at your " + speedName +
+      " speed, with every pause and hide, then a hold on the finished sheet. About " +
+      Math.round(plan.duration / 100) / 10 + " seconds."));
+    var row = htmlEl("div", "gif-row");
+    row.appendChild(htmlEl("span", "gif-label", "Size"));
+    var seg = htmlEl("span", "gif-seg");
+    [[1, "1×"], [2, "2×  sharper"]].forEach(function (opt) {
+      seg.appendChild(toolButton({ label: opt[1], pressed: o.scale === opt[0], onClick: function () { o.scale = opt[0]; showVideoExport(); } }));
+    });
+    row.appendChild(seg);
+    m.appendChild(row);
+    m.appendChild(htmlEl("p", "gif-note", "Videos always keep the paper background, since MP4 has no transparency. The long side is capped at 1920 pixels."));
+    var status = htmlEl("p", "gif-note gif-status", "");
+    m.appendChild(status);
+
+    var foot = htmlEl("div", "modal-foot");
+    foot.appendChild(toolButton({ label: "Cancel", onClick: closeModal }));
+    var go = toolButton({ label: "Export MP4", onClick: function () {
+      go.disabled = true;
+      status.textContent = "Getting the encoder ready…";
+      videoJob = exportVideo(o, function (done, total) {
+        status.textContent = "Recording frame " + (done + 1) + " of " + total + "…";
+      }, function (blob, info) {
+        videoJob = null;
+        download(fileBase() + ".mp4", blob);
+        closeModal();
+        toast("Saved the video (" + info.w + "×" + info.h + ", " + Math.round(info.seconds * 10) / 10 + "s, " + (blob.size / 1048576).toFixed(1) + " MB)");
+      }, function (why) {
+        videoJob = null;
+        status.textContent = why === "codec"
+          ? "This browser can't make MP4 videos. Chrome, Edge or Safari can, or use File, Export, GIF."
+          : "The video could not be made in this browser. Try again, or use the GIF export.";
+        go.disabled = false;
+      });
+    } });
+    go.classList.add("accent");
+    foot.appendChild(go);
+    m.appendChild(foot);
+  });
+}
+
 function exportSvg() { download(fileBase() + ".svg", buildSvgString(true), "image/svg+xml"); toast("Saved the SVG"); }
 function exportHtml() {
   var body = buildSvgString(false);
@@ -6088,7 +6326,11 @@ function newDoc() {
    25. Modals
    ================================================================ */
 var scrim = $("scrim"), modal = $("modal");
-function closeModal() { if (gifJob) { gifJob.cancelled = true; gifJob = null; } scrim.hidden = true; clear(modal); }
+function closeModal() {
+  if (gifJob) { gifJob.cancelled = true; gifJob = null; }
+  if (videoJob) { videoJob.cancelled = true; videoJob = null; }
+  scrim.hidden = true; clear(modal);
+}
 scrim.addEventListener("pointerdown", function (e) { if (e.target === scrim) closeModal(); });
 
 function openModal(build) { clear(modal); build(modal); scrim.hidden = false; }
