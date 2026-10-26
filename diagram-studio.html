@@ -305,6 +305,10 @@ input[type="color"] {
 }
 .fmt-strip[hidden] { display: none; }
 .fmt-strip .btn { height: 24px; min-width: 26px; padding: 0 6px; border-radius: var(--r-s); font-size: 12.5px; }
+.fmt-strip { align-items: center; white-space: nowrap; }
+.ink-row { display: flex; align-items: center; gap: 3px; padding-left: 4px; margin-left: 2px; border-left: 1px solid var(--hair-2); }
+.ink-row[hidden] { display: none; }
+.ink-row .swatch-btn { width: 17px; height: 17px; }
 
 /* inline editor */
 .inline-edit {
@@ -420,6 +424,7 @@ input[type="color"] {
 .gif-note { margin: 6px 0 0; font-size: 12px; line-height: 1.55; color: var(--ink-soft); }
 .gif-status:empty { display: none; }
 .code-colours .gif-row { margin-bottom: 6px; }
+.bar-label { font-size: 12px; color: var(--ink-mid); margin-left: 4px; }
 .code-sample { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; padding: 2px 8px; background: #F7F4EC; border: 1px solid var(--hair-2); border-radius: 5px; min-width: 96px; }
 
 /* toast */
@@ -959,17 +964,19 @@ function snap(value) {
    marker only counts when it hugs a word (no space just inside it) and
    has a partner later on the line, so "2 * 3" and "C++" stay as typed;
    a backslash keeps a marker literal. Underscores are left alone, since
-   names like school_id are common. */
+   names like school_id are common. Colour wraps words as
+   {#D9480F}these words{/} and can hold the other formats inside. */
 var RICH_MARKS = [["**", "b"], ["++", "u"], ["~~", "s"], ["*", "i"]];
 var MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
 function parseRich(line) {
-  var runs = [], buf = "", style = { b: false, i: false, u: false, s: false };
+  var runs = [], buf = "", style = { b: false, i: false, u: false, s: false }, inks = [];
+  function ink() { return inks.length ? inks[inks.length - 1] : null; }
   function flush() {
     if (!buf) return;
     var last = runs[runs.length - 1];
-    if (last && !last.code && last.b === style.b && last.i === style.i && last.u === style.u && last.s === style.s) last.text += buf;
-    else runs.push({ text: buf, b: style.b, i: style.i, u: style.u, s: style.s, code: false });
+    if (last && !last.code && last.b === style.b && last.i === style.i && last.u === style.u && last.s === style.s && last.c === ink()) last.text += buf;
+    else runs.push({ text: buf, b: style.b, i: style.i, u: style.u, s: style.s, c: ink(), code: false });
     buf = "";
   }
   function closes(mark, from) {
@@ -980,12 +987,17 @@ function parseRich(line) {
   }
   for (var i = 0; i < line.length;) {
     var ch = line[i];
-    if (ch === "\\" && i + 1 < line.length && "*+~`\\".indexOf(line[i + 1]) >= 0) { buf += line[i + 1]; i += 2; continue; }
+    if (ch === "\\" && i + 1 < line.length && "*+~`{\\".indexOf(line[i + 1]) >= 0) { buf += line[i + 1]; i += 2; continue; }
+    if (ch === "{") {
+      var opens = /^\{#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\}/.exec(line.slice(i));
+      if (opens && line.indexOf("{/}", i + opens[0].length) >= 0) { flush(); inks.push(parseHex(opens[1])); i += opens[0].length; continue; }
+      if (line.substr(i, 3) === "{/}" && inks.length) { flush(); inks.pop(); i += 3; continue; }
+    }
     if (ch === "`") {
       var shut = line.indexOf("`", i + 1);
       if (shut > i + 1) {
         flush();
-        runs.push({ text: line.slice(i + 1, shut), b: style.b, i: style.i, u: style.u, s: style.s, code: true });
+        runs.push({ text: line.slice(i + 1, shut), b: style.b, i: style.i, u: style.u, s: style.s, c: ink(), code: true });
         i = shut + 1;
         continue;
       }
@@ -1024,7 +1036,7 @@ function runWidth(run, format) {
   measurer.font = runFont(run, format);
   return measurer.measureText(run.text).width;
 }
-function sameStyle(a, b) { return a.b === b.b && a.i === b.i && a.u === b.u && a.s === b.s && a.code === b.code; }
+function sameStyle(a, b) { return a.b === b.b && a.i === b.i && a.u === b.u && a.s === b.s && a.code === b.code && a.c === b.c; }
 
 /* Lines of runs. With format.wrapWidth, lines break between words to fit,
    and a word wider than the line is split by letters. */
@@ -1077,6 +1089,7 @@ function appendRuns(parent, runs, format) {
       t.setAttribute("text-decoration", deco.join(" "));
     }
     if (r.code) { t.setAttribute("font-family", MONO); t.setAttribute("font-size", (format.size * 0.92).toFixed(2)); }
+    if (r.c) t.setAttribute("fill", r.c);
     t.textContent = r.text;
     parent.appendChild(t);
   });
@@ -1100,7 +1113,7 @@ function styledText(x, y, content, format) {
   if (decorations.length) node.setAttribute("text-decoration", decorations.join(" "));
 
   var lines = richLines(content, format);
-  var plain = lines.every(function (l) { return l.every(function (r) { return !r.b && !r.i && !r.u && !r.s && !r.code; }); });
+  var plain = lines.every(function (l) { return l.every(function (r) { return !r.b && !r.i && !r.u && !r.s && !r.code && !r.c; }); });
   if (lines.length === 1 && plain) {
     node.textContent = lines[0].map(function (r) { return r.text; }).join("");
     return node;
@@ -1302,6 +1315,11 @@ function syncFills(node) {
   var was = Array.isArray(node.aligns) ? node.aligns : [];
   node.aligns = node.cells.map(function (row, r) {
     return row.map(function (_, c) { var a = was[r] && was[r][c]; return /^[lcr][tmb]w?$/.test(a || "") ? a : null; });
+  });
+  /* and so does each cell's own text colour (null: the table's) */
+  var inked = Array.isArray(node.inks) ? node.inks : [];
+  node.inks = node.cells.map(function (row, r) {
+    return row.map(function (_, c) { return parseHex(inked[r] && inked[r][c]) || null; });
   });
 }
 function cellAlign(node, r, c) {
@@ -2315,6 +2333,7 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
     for (c = 0; c < t.cols; c++) {
       if (!node.cells[r][c] || isCovered(node, r, c)) continue;
       var setting = cellFormat(node, r, c, format);
+      if (node.inks && node.inks[r][c]) setting.color = node.inks[r][c];
       var spot = cellTextSpot(node, r, c, richLines(node.cells[r][c], setting).length, format.size);
       setting.anchor = spot.anchor;
       labelGroup.appendChild(styledText(spot.x, spot.y, node.cells[r][c], setting));
@@ -2687,6 +2706,13 @@ function unmergePicked() {
 function eachPickedCell(cur, visit) {
   for (var r = cur.r0; r <= cur.r1; r++) for (var c = cur.c0; c <= cur.c1; c++) visit(r, c);
 }
+function setCellInk(hex) {
+  var cur = currentCell();
+  if (!cur) return;
+  if (!cur.node.inks) syncFills(cur.node);
+  eachPickedCell(cur, function (r, c) { cur.node.inks[r][c] = hex; });
+  commit(); render();
+}
 function setCellFill(hex) {
   var cur = currentCell();
   if (!cur) return;
@@ -2994,24 +3020,26 @@ function makeNode(type, style, at, tone) {
 /* Rows and columns keep their size, so the table grows or shrinks
    around them instead of squashing what is already there. */
 function addTableRow(node, at) {
-  if (!node.aligns) syncFills(node);
+  if (!node.aligns || !node.inks) syncFills(node);
   var t = tableSize(node);
   var r = at == null ? t.rows : at;
   if (r < t.rows) shiftEdgeRows(node.id, function (row) { return row >= r ? row + 1 : row; });
   node.cells.splice(r, 0, node.cells[0].map(function () { return ""; }));
   node.fills.splice(r, 0, node.cells[0].map(function () { return null; }));
   node.aligns.splice(r, 0, node.cells[0].map(function () { return null; }));
+  node.inks.splice(r, 0, node.cells[0].map(function () { return null; }));
   var fresh = node.rowBase || node.h / t.rows;
   if (node.rowH) { var hs = rowHeights(node); hs.splice(r, 0, fresh); node.rowH = hs.map(Math.round); }
   node.h = Math.round(node.h + fresh);
 }
 function addTableCol(node, at) {
-  if (!node.aligns) syncFills(node);
+  if (!node.aligns || !node.inks) syncFills(node);
   var t = tableSize(node), ws = colWidths(node);
   var c = at == null ? t.cols : at, fresh = node.w / t.cols;
   node.cells.forEach(function (row) { row.splice(c, 0, ""); });
   node.fills.forEach(function (row) { row.splice(c, 0, null); });
   node.aligns.forEach(function (row) { row.splice(c, 0, null); });
+  node.inks.forEach(function (row) { row.splice(c, 0, null); });
   ws.splice(c, 0, fresh);
   node.colW = ws.map(function (w) { return Math.round(w); });
   node.w = Math.round(node.w + fresh);
@@ -3040,7 +3068,7 @@ function deleteTableSpan(n, axis, a0, a1) {
     var start = axis === "r" ? m.r : m.c, end = start + (axis === "r" ? m.rs : m.cs) - 1;
     if (start < a0 || start > a1 || a1 + 1 > end) return;
     var r = axis === "r" ? a1 + 1 : m.r, c = axis === "r" ? m.c : a1 + 1;
-    n.cells[r][c] = n.cells[m.r][m.c]; n.fills[r][c] = n.fills[m.r][m.c]; n.aligns[r][c] = n.aligns[m.r][m.c];
+    n.cells[r][c] = n.cells[m.r][m.c]; n.fills[r][c] = n.fills[m.r][m.c]; n.aligns[r][c] = n.aligns[m.r][m.c]; n.inks[r][c] = n.inks[m.r][m.c];
   });
   n.merges = merges.map(function (m) {
     var start = axis === "r" ? m.r : m.c, len = axis === "r" ? m.rs : m.cs, end = start + len - 1;
@@ -3051,12 +3079,12 @@ function deleteTableSpan(n, axis, a0, a1) {
   if (axis === "r") {
     shiftEdgeRows(n.id, function (r) { return r < a0 ? r : r > a1 ? r - count : null; });
     var hs = rowHeights(n), lost = hs.splice(a0, count).reduce(function (a, b) { return a + b; }, 0);
-    n.cells.splice(a0, count); n.fills.splice(a0, count); n.aligns.splice(a0, count);
+    n.cells.splice(a0, count); n.fills.splice(a0, count); n.aligns.splice(a0, count); n.inks.splice(a0, count);
     if (n.rowH) n.rowH = hs.map(Math.round);
     n.h = Math.max(MIN_H, Math.round(n.h - lost));
   } else {
     var ws = colWidths(n), gone = ws.splice(a0, count).reduce(function (a, b) { return a + b; }, 0);
-    [n.cells, n.fills, n.aligns].forEach(function (grid) { grid.forEach(function (row) { row.splice(a0, count); }); });
+    [n.cells, n.fills, n.aligns, n.inks].forEach(function (grid) { grid.forEach(function (row) { row.splice(a0, count); }); });
     n.colW = ws.map(function (w) { return Math.round(w); });
     n.w = Math.max(MIN_W, Math.round(n.w - gone));
   }
@@ -3070,7 +3098,7 @@ function editTables(change) {
   if (!list.length) return;
   var pick = currentCell(), before = stateJSON();
   list.forEach(function (n) {
-    if (!n.aligns) syncFills(n);
+    if (!n.aligns || !n.inks) syncFills(n);
     var t = tableSize(n), mine = pick && pick.node === n;
     if (change === "addRow") addTableRow(n);
     if (change === "addCol") addTableCol(n);
@@ -4224,6 +4252,7 @@ function closeEditor(silent) {
   editing = null;
   inlineInput.hidden = true;
   fmtStrip.hidden = true;
+  inkRow.hidden = true; inkToggle.setAttribute("aria-pressed", "false"); inkSpan = null;
   if (!silent) {
     var now = stateJSON();
     if (now !== was.before) { snapshot = was.before; commit(); }
@@ -4313,7 +4342,78 @@ inlineInput.addEventListener("keydown", function (event) {
     openEditor(id, next);
   }
 });
-inlineInput.addEventListener("blur", function () { if (editing) closeEditor(); });
+/* Colouring words while typing: the strip's colour button opens a row
+   of inks. Choosing one wraps the selection (or the word under the
+   caret) in {#hex}...{/}, replacing any colour already around it;
+   "No colour" takes it off. "Any colour" uses the shared picker and
+   keeps the editor open while it is up. */
+var TEXT_INKS = ["#23231F", "#DD4B44", "#B97F12", "#4C7040", "#2E7A7B", "#2E5E8C", "#5B4A85", "#8C8A80"];
+var inkSpan = null;   /* the selection to colour while the picker is open */
+function colourWords(hex, span) {
+  var el = inlineInput, v = el.value;
+  var a = span ? span[0] : el.selectionStart, b = span ? span[1] : el.selectionEnd;
+  if (a === b) {
+    while (a > 0 && /\S/.test(v[a - 1])) a--;
+    while (b < v.length && /\S/.test(v[b])) b++;
+  }
+  while (a < b && /\s/.test(v[a])) a++;
+  while (b > a && /\s/.test(v[b - 1])) b--;
+  /* step outside a colour already wrapped around exactly these words */
+  var before = /\{#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\}$/.exec(v.slice(0, a));
+  if (before && v.slice(b, b + 3) === "{/}") { a -= before[0].length; b += 3; }
+  var inner = v.slice(a, b), wrapped = /^\{#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\}([\s\S]*)\{\/\}$/.exec(inner);
+  if (wrapped) inner = wrapped[1];
+  inner = inner.replace(/\{#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\}|\{\/\}/g, "");
+  var put = hex ? "{" + hex + "}" + inner + "{/}" : inner;
+  el.value = v.slice(0, a) + put + v.slice(b);
+  var start = a + (hex ? hex.length + 2 : 0);
+  el.focus();
+  el.setSelectionRange(start, start + inner.length);
+  applyEditor();
+}
+var inkRow = htmlEl("span", "ink-row"), inkAny = null;
+inkRow.hidden = true;
+TEXT_INKS.forEach(function (hex) {
+  var b = htmlEl("button", "swatch-btn");
+  b.type = "button";
+  b.style.background = hex;
+  b.dataset.tip = hex;
+  b.setAttribute("aria-label", "Colour " + hex);
+  b.addEventListener("mousedown", function (e) { e.preventDefault(); });
+  b.addEventListener("pointerdown", function (e) { e.preventDefault(); e.stopPropagation(); });
+  b.addEventListener("click", function (e) { e.preventDefault(); colourWords(hex); });
+  inkRow.appendChild(b);
+});
+[["Any colour…", function () {
+  inkSpan = [inlineInput.selectionStart, inlineInput.selectionEnd];
+  openColorPicker(inkAny, null, "Colour these words", function (hex) { colourWords(hex, inkSpan); inkSpan = [inlineInput.selectionStart, inlineInput.selectionEnd]; });
+}], ["No colour", function () { colourWords(null); }]].forEach(function (o) {
+  var b = toolButton({ label: o[0], title: o[0] === "No colour" ? "Take the colour off these words" : "Pick any colour, or a hex" });
+  b.addEventListener("mousedown", function (e) { e.preventDefault(); });
+  b.addEventListener("pointerdown", function (e) { e.preventDefault(); e.stopPropagation(); });
+  b.addEventListener("click", function (e) { e.preventDefault(); o[1](); });
+  inkRow.appendChild(b);
+  if (o[0] === "Any colour…") inkAny = b;
+});
+var inkToggle = toolButton({ icon: "palette", title: "Colour the selected words" });
+inkToggle.addEventListener("mousedown", function (e) { e.preventDefault(); });
+inkToggle.addEventListener("pointerdown", function (e) { e.preventDefault(); e.stopPropagation(); });
+inkToggle.addEventListener("click", function (e) {
+  e.preventDefault();
+  inkRow.hidden = !inkRow.hidden;
+  inkToggle.setAttribute("aria-pressed", String(!inkRow.hidden));
+  layoutEditor();
+});
+fmtStrip.appendChild(inkToggle);
+fmtStrip.appendChild(inkRow);
+
+/* Focus moving into the strip or the colour picker is still typing. */
+inlineInput.addEventListener("blur", function (e) {
+  var to = e.relatedTarget;
+  if (to && (fmtStrip.contains(to) || palette.contains(to))) return;
+  if (editing && !palette.hidden && inkSpan) return;
+  if (editing) closeEditor();
+});
 
 /* Tab walks the cells in reading order. Tabbing out of the last cell adds
    a fresh row, the way a spreadsheet does. */
@@ -4689,6 +4789,15 @@ function buildNodeBubble(node) {
       bubble.appendChild(htmlEl("span", null, oneRegion ? "Merged cell" : many ? shades.length + " cells" : "Cell"));
       bubble.appendChild(paletteRow(now, function (preset) { setCellFill(preset.fill); }));
       bubble.appendChild(colorControl(now || node.fill, many ? "Any colour for these cells" : "Any colour for this cell", setCellFill));
+      /* the text colour of the picked cells, apart from the table's */
+      var inks = [];
+      eachPickedCell(cur, function (r, c) { inks.push(cur.node.inks ? cur.node.inks[r][c] : null); });
+      var inkNow = inks.every(function (x) { return x === inks[0]; }) ? inks[0] : null;
+      bubble.appendChild(htmlEl("span", "bar-label", "Text"));
+      bubble.appendChild(colorControl(inkNow || node.titleColor || INK, many ? "Text colour for these cells" : "Text colour for this cell", setCellInk));
+      if (inks.some(Boolean)) {
+        bubble.appendChild(toolButton({ icon: "trash", title: "Back to the table's text colour", onClick: function () { setCellInk(null); } }));
+      }
       bubble.appendChild(toolButton({
         label: "Clear", title: many ? "Take the colour off these cells" : "Take the colour off this cell",
         disabled: !shades.some(Boolean),
@@ -5107,6 +5216,10 @@ $("stagewrap").addEventListener("drop", function (e) {
 var menu = $("menu"), palette = $("palette"), openMenuBtn = null;
 
 function closeMenus() {
+  if (editing && inkSpan && !palette.hidden) {
+    inkSpan = null;
+    window.requestAnimationFrame(function () { if (editing) inlineInput.focus(); });
+  }
   menu.hidden = true;
   palette.hidden = true;
   if (openMenuBtn) { openMenuBtn.setAttribute("aria-expanded", "false"); openMenuBtn = null; }
