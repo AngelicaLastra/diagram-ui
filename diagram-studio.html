@@ -297,6 +297,14 @@ input[type="color"] {
   border-radius: var(--r-s); background: var(--paper); cursor: pointer; flex: 0 0 auto;
 }
 
+/* format strip over the inline editor */
+.fmt-strip {
+  position: absolute; z-index: 8; display: flex; gap: 2px; padding: 3px;
+  background: var(--paper); border: 1px solid var(--hair); border-radius: 9px; box-shadow: var(--shadow);
+}
+.fmt-strip[hidden] { display: none; }
+.fmt-strip .btn { height: 24px; min-width: 26px; padding: 0 6px; border-radius: var(--r-s); font-size: 12.5px; }
+
 /* inline editor */
 .inline-edit {
   position: absolute; transform: translate(-50%, -50%);
@@ -518,6 +526,7 @@ input[type="color"] {
 
         <div class="floating" id="bubble" hidden></div>
         <textarea id="inlineEdit" class="inline-edit" hidden spellcheck="false" aria-label="Edit label" rows="1"></textarea>
+        <div class="fmt-strip" id="fmtStrip" role="toolbar" aria-label="Format the selected words" hidden></div>
       </div>
     </div>
 
@@ -938,6 +947,136 @@ function snap(value) {
 /* ================================================================
    6. Text nodes  (multi-line aware)
    ================================================================ */
+/* Text can carry formatting inside it, written the way chat apps do:
+   **bold**, *italic*, ++underline++, ~~strikethrough~~ and `code`. A
+   marker only counts when it hugs a word (no space just inside it) and
+   has a partner later on the line, so "2 * 3" and "C++" stay as typed;
+   a backslash keeps a marker literal. Underscores are left alone, since
+   names like school_id are common. */
+var RICH_MARKS = [["**", "b"], ["++", "u"], ["~~", "s"], ["*", "i"]];
+var MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+function parseRich(line) {
+  var runs = [], buf = "", style = { b: false, i: false, u: false, s: false };
+  function flush() {
+    if (!buf) return;
+    var last = runs[runs.length - 1];
+    if (last && !last.code && last.b === style.b && last.i === style.i && last.u === style.u && last.s === style.s) last.text += buf;
+    else runs.push({ text: buf, b: style.b, i: style.i, u: style.u, s: style.s, code: false });
+    buf = "";
+  }
+  function closes(mark, from) {
+    for (var j = line.indexOf(mark, from); j >= 0; j = line.indexOf(mark, j + 1)) {
+      if (!/\s/.test(line[j - 1]) && line[j - 1] !== "\\") return true;
+    }
+    return false;
+  }
+  for (var i = 0; i < line.length;) {
+    var ch = line[i];
+    if (ch === "\\" && i + 1 < line.length && "*+~`\\".indexOf(line[i + 1]) >= 0) { buf += line[i + 1]; i += 2; continue; }
+    if (ch === "`") {
+      var shut = line.indexOf("`", i + 1);
+      if (shut > i + 1) {
+        flush();
+        runs.push({ text: line.slice(i + 1, shut), b: style.b, i: style.i, u: style.u, s: style.s, code: true });
+        i = shut + 1;
+        continue;
+      }
+    }
+    var hit = null;
+    for (var m = 0; m < RICH_MARKS.length && !hit; m++) {
+      var mark = RICH_MARKS[m][0], key = RICH_MARKS[m][1];
+      if (line.substr(i, mark.length) !== mark) continue;
+      if (style[key] && i > 0 && !/\s/.test(line[i - 1])) hit = { mark: mark, key: key, on: false };
+      else if (!style[key] && i + mark.length < line.length && !/\s/.test(line[i + mark.length]) &&
+               closes(mark, i + mark.length + 1)) hit = { mark: mark, key: key, on: true };
+    }
+    if (hit) { flush(); style[hit.key] = hit.on; i += hit.mark.length; continue; }
+    buf += ch; i++;
+  }
+  flush();
+  return runs;
+}
+/* The words without their markers, for lists and labels. */
+function plainText(text) {
+  return String(text == null ? "" : text).split("\n").map(function (l) {
+    return parseRich(l).map(function (r) { return r.text; }).join("");
+  }).join("\n");
+}
+
+/* Measuring uses the same fonts the sheet draws with. */
+var measurer = null;
+function runFont(run, format) {
+  var size = run.code ? format.size * 0.92 : format.size;
+  var weight = format.bold || run.b ? 700 : (format.weight || 400);
+  return (format.italic || run.i ? "italic " : "") + weight + " " + size + "px " +
+         (run.code ? MONO : "Poppins, system-ui, sans-serif");
+}
+function runWidth(run, format) {
+  measurer = measurer || document.createElement("canvas").getContext("2d");
+  measurer.font = runFont(run, format);
+  return measurer.measureText(run.text).width;
+}
+function sameStyle(a, b) { return a.b === b.b && a.i === b.i && a.u === b.u && a.s === b.s && a.code === b.code; }
+
+/* Lines of runs. With format.wrapWidth, lines break between words to fit,
+   and a word wider than the line is split by letters. */
+function richLines(content, format) {
+  var out = [];
+  String(content == null ? "" : content).split("\n").forEach(function (para) {
+    var runs = parseRich(para);
+    if (!format.wrapWidth) { out.push(runs); return; }
+    var max = format.wrapWidth, line = [], used = 0;
+    function put(text, run) {
+      var last = line[line.length - 1];
+      if (last && sameStyle(last, run)) last.text += text;
+      else line.push(Object.assign({}, run, { text: text }));
+    }
+    function breakLine() {
+      while (line.length && !line[line.length - 1].text.trim()) line.pop();
+      if (line.length) line[line.length - 1].text = line[line.length - 1].text.replace(/\s+$/, "");
+      out.push(line); line = []; used = 0;
+    }
+    runs.forEach(function (run) {
+      run.text.split(/(\s+)/).forEach(function (tok) {
+        if (!tok) return;
+        var w = runWidth(Object.assign({}, run, { text: tok }), format);
+        if (!tok.trim()) { if (line.length) { put(tok, run); used += w; } return; }
+        if (used + w > max && line.length) breakLine();
+        while (w > max && tok.length > 1) {
+          var cut = tok.length - 1;
+          while (cut > 1 && runWidth(Object.assign({}, run, { text: tok.slice(0, cut) }), format) > max) cut--;
+          put(tok.slice(0, cut), run);
+          breakLine();
+          tok = tok.slice(cut);
+          w = runWidth(Object.assign({}, run, { text: tok }), format);
+        }
+        put(tok, run); used += w;
+      });
+    });
+    breakLine();
+  });
+  return out;
+}
+function appendRuns(parent, runs, format) {
+  runs.forEach(function (r) {
+    var t = makeEl("tspan", {});
+    if (r.b && !format.bold) t.setAttribute("font-weight", 700);
+    if (r.i && !format.italic) t.setAttribute("font-style", "italic");
+    if (r.u || r.s) {
+      var deco = [];
+      if (r.u || format.underline) deco.push("underline");
+      if (r.s || format.strike) deco.push("line-through");
+      t.setAttribute("text-decoration", deco.join(" "));
+    }
+    if (r.code) { t.setAttribute("font-family", MONO); t.setAttribute("font-size", (format.size * 0.92).toFixed(2)); }
+    t.textContent = r.text;
+    parent.appendChild(t);
+  });
+}
+
+/* Draws text with its lines centred around y. Returns the <text>, or a
+   group holding it when inline code needs its soft background. */
 function styledText(x, y, content, format) {
   var decorations = [];
   if (format.strike) decorations.push("line-through");
@@ -953,20 +1092,44 @@ function styledText(x, y, content, format) {
   });
   if (decorations.length) node.setAttribute("text-decoration", decorations.join(" "));
 
-  var lines = String(content == null ? "" : content).split("\n");
-  if (lines.length === 1) {
-    node.textContent = lines[0];
+  var lines = richLines(content, format);
+  var plain = lines.every(function (l) { return l.every(function (r) { return !r.b && !r.i && !r.u && !r.s && !r.code; }); });
+  if (lines.length === 1 && plain) {
+    node.textContent = lines[0].map(function (r) { return r.text; }).join("");
     return node;
   }
   var lh = format.size * 1.25;
   var top = y - ((lines.length - 1) * lh) / 2;
+  var marks = [];
   lines.forEach(function (line, i) {
-    var span = makeEl("tspan", { x: x, y: (top + i * lh).toFixed(1) });
-    span.textContent = line === "" ? " " : line;
-    node.appendChild(span);
+    var ly = lines.length === 1 ? y : top + i * lh;
+    var span = lines.length === 1 ? node : makeEl("tspan", { x: x, y: ly.toFixed(1) });
+    if (!line.length) span.textContent = " ";
+    else appendRuns(span, line, format);
+    if (span !== node) node.appendChild(span);
+    if (line.some(function (r) { return r.code; })) {
+      var widths = line.map(function (r) { return runWidth(r, format); });
+      var total = widths.reduce(function (a, b) { return a + b; }, 0);
+      var anchor = format.anchor || "start";
+      var at = anchor === "middle" ? x - total / 2 : anchor === "end" ? x - total : x;
+      line.forEach(function (r, j) {
+        if (r.code) marks.push({ x: at - 2.5, y: ly - format.size * 0.86, w: widths[j] + 5, h: format.size * 1.16 });
+        at += widths[j];
+      });
+    }
   });
-  return node;
+  if (!marks.length) return node;
+  var g = makeEl("g", {});
+  marks.forEach(function (m) {
+    g.appendChild(makeEl("rect", {
+      x: m.x.toFixed(1), y: m.y.toFixed(1), width: m.w.toFixed(1), height: m.h.toFixed(1),
+      rx: 3, fill: format.color || INK, "fill-opacity": 0.09
+    }));
+  });
+  g.appendChild(node);
+  return g;
 }
+
 
 /* ================================================================
    7. Seeded randomness, so each shape is crooked in its own way
@@ -1140,45 +1303,20 @@ function cellAlign(node, r, c) {
 }
 function alignCode(al) { return al.h === "c" && al.v === "m" && !al.wrap ? null : al.h + al.v + (al.wrap ? "w" : ""); }
 
-/* Wrapping measures words with the same font the sheet draws in. */
-var measurer = null;
-function textWidth(str, size, weight, italic) {
-  measurer = measurer || document.createElement("canvas").getContext("2d");
-  measurer.font = (italic ? "italic " : "") + weight + " " + size + "px Poppins, system-ui, sans-serif";
-  return measurer.measureText(str).width;
+function cellWeight(node, r) { return node.header && r === 0 && node.cells.length > 1 ? 600 : 500; }
+/* How a cell's text is set: the table's font, the header weight, and a
+   wrap width when wrapping is on. */
+function cellFormat(node, r, c, base) {
+  var f = Object.assign({
+    size: node.titleSize || 11.5, bold: node.bold, italic: node.italic,
+    strike: node.strike, underline: node.underline
+  }, base || {});
+  f.weight = cellWeight(node, r);
+  f.wrapWidth = cellAlign(node, r, c).wrap ? Math.max(10, cellBox(node, r, c).w - CELL_PAD * 2) : null;
+  return f;
 }
-/* Breaks text into lines no wider than width, keeping the user's own
-   line breaks; a word too long for a line is split by letters. */
-function wrapLines(text, width, size, weight, italic) {
-  var out = [];
-  String(text || "").split("\n").forEach(function (para) {
-    var line = "";
-    para.split(/\s+/).filter(Boolean).forEach(function (word) {
-      var trial = line ? line + " " + word : word;
-      if (textWidth(trial, size, weight, italic) <= width || !line) {
-        line = trial;
-      } else {
-        out.push(line);
-        line = word;
-      }
-      while (textWidth(line, size, weight, italic) > width && line.length > 1) {
-        var cut = line.length - 1;
-        while (cut > 1 && textWidth(line.slice(0, cut), size, weight, italic) > width) cut--;
-        out.push(line.slice(0, cut));
-        line = line.slice(cut);
-      }
-    });
-    out.push(line);
-  });
-  return out;
-}
-function cellWeight(node, r) { return node.bold ? 700 : node.header && r === 0 && node.cells.length > 1 ? 600 : 500; }
-/* The text a cell shows: wrapped to its width when wrapping is on. */
-function shownCellText(node, r, c) {
-  var text = node.cells[r][c];
-  if (!text || !cellAlign(node, r, c).wrap) return text;
-  var size = node.titleSize || 11.5, box = cellBox(node, r, c);
-  return wrapLines(text, Math.max(10, box.w - CELL_PAD * 2), size, cellWeight(node, r), node.italic).join("\n");
+function cellLineCount(node, r, c, text) {
+  return richLines(text == null ? node.cells[r][c] : text, cellFormat(node, r, c)).length;
 }
 /* Grows each row to fit its wrapped cells, and lets it shrink back to the
    table's usual row height (rowBase) when the text gets shorter. Runs
@@ -1195,7 +1333,7 @@ function fitTableRows(n) {
       row.forEach(function (text, c) {
         var m = mergeAt(n, r, c);
         if (!text || isCovered(n, r, c) || (m && m.rs > 1) || !cellAlign(n, r, c).wrap) return;
-        var lines = shownCellText(n, r, c).split("\n").length;
+        var lines = cellLineCount(n, r, c);
         need[r] = Math.max(need[r], Math.ceil(lines * size * 1.25 + CELL_PAD * 2));
       });
     });
@@ -1213,9 +1351,9 @@ function fitAllTables() { nodes().forEach(fitTableRows); }
 /* Where a cell's text sits. Several lines stay a block, so top and bottom
    move the whole block rather than its middle line. */
 var CELL_PAD = 6;
-function cellTextSpot(node, r, c, text, size) {
+function cellTextSpot(node, r, c, lines, size) {
   var box = cellBox(node, r, c), al = cellAlign(node, r, c);
-  var lines = String(text || "").split("\n").length, block = (lines - 1) * size * 1.25 / 2;
+  var block = (lines - 1) * size * 1.25 / 2;
   var x = al.h === "l" ? box.x + CELL_PAD : al.h === "r" ? box.x + box.w - CELL_PAD : box.x + box.w / 2;
   var y = al.v === "t" ? box.y + CELL_PAD + size * 0.8 + block
         : al.v === "b" ? box.y + box.h - CELL_PAD - size * 0.25 - block
@@ -1890,11 +2028,10 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
   for (r = 0; r < t.rows; r++) {
     for (c = 0; c < t.cols; c++) {
       if (!node.cells[r][c] || isCovered(node, r, c)) continue;
-      var text = shownCellText(node, r, c);
-      var spot = cellTextSpot(node, r, c, text, format.size);
-      var cellFormat = Object.assign({}, format, { anchor: spot.anchor });
-      if (node.header && r === 0 && t.rows > 1) cellFormat.weight = 600;
-      labelGroup.appendChild(styledText(spot.x, spot.y, text, cellFormat));
+      var setting = cellFormat(node, r, c, format);
+      var spot = cellTextSpot(node, r, c, richLines(node.cells[r][c], setting).length, format.size);
+      setting.anchor = spot.anchor;
+      labelGroup.appendChild(styledText(spot.x, spot.y, node.cells[r][c], setting));
     }
   }
 }
@@ -1960,7 +2097,7 @@ function drawEdge(edge) {
       riding.setAttribute("dy", -5);
       var textPath = makeEl("textPath", { href: "#" + guideId, startOffset: "50%" });
       textPath.setAttribute("xlink:href", "#" + guideId);
-      textPath.textContent = edge.label;
+      appendRuns(textPath, [].concat.apply([], richLines(edge.label.replace(/\n/g, " "), format)), format);
       riding.appendChild(textPath);
       labelGroup.appendChild(riding);
     } else {
@@ -3561,9 +3698,9 @@ function openEditor(id, field) {
   window.requestAnimationFrame(function () {
     if (editing && document.activeElement !== inlineInput) { inlineInput.focus(); inlineInput.select(); }
   });
-  setHint(cell ? "Typing in a cell. Tab moves to the next one, Shift+Enter starts a new line, Esc finishes."
+  setHint((cell ? "Typing in a cell. Tab moves to the next one, Esc finishes."
     : found.kind === "node" ? "Typing. Tab swaps between the title and the caption, Esc finishes."
-    : "Typing. Esc finishes.");
+    : "Typing. Esc finishes.") + " Select words and press " + MOD + "+B, I, U or E (code) to format just them.");
 }
 
 function layoutEditor() {
@@ -3575,12 +3712,12 @@ function layoutEditor() {
 
   if (cell) {
     var size = found.item.titleSize || 11.5;
-    var shown = cellAlign(found.item, cell.r, cell.c).wrap ? shownCellText(found.item, cell.r, cell.c) : inlineInput.value;
-    var at = cellTextSpot(found.item, cell.r, cell.c, shown, size), cb = at.box;
+    var shownLines = cellLineCount(found.item, cell.r, cell.c, inlineInput.value);
+    var at = cellTextSpot(found.item, cell.r, cell.c, shownLines, size), cb = at.box;
     spot = {
       x: cb.x + cb.w / 2, y: at.align.v === "m" ? cb.y + cb.h / 2 : at.y - size * 0.35,
       width: Math.max(cb.w - 8, 40), size: size, textAlign: at.align.h === "l" ? "left" : at.align.h === "r" ? "right" : "center",
-      lines: String(shown || "").split("\n").length
+      lines: shownLines
     };
   } else if (found.kind === "node") {
     var n = found.item, mid = center(n);
@@ -3612,6 +3749,13 @@ function layoutEditor() {
   inlineInput.style.fontWeight = found.item.bold ? 700 : 500;
   inlineInput.style.fontStyle = found.item.italic ? "italic" : "normal";
   inlineInput.style.textAlign = spot.textAlign || "";
+
+  /* the format strip sits just above the box, inside the sheet */
+  fmtStrip.hidden = false;
+  var strip = fmtStrip.getBoundingClientRect(), sheetBox = sheet.getBoundingClientRect();
+  var boxH = lines * fontPx * 1.3 + 10;
+  fmtStrip.style.left = clamp(place.x - strip.width / 2, 8, sheetBox.width - strip.width - 8) + "px";
+  fmtStrip.style.top = Math.max(8, place.y - boxH / 2 - strip.height - 6) + "px";
 }
 
 function applyEditor() {
@@ -3638,6 +3782,7 @@ function closeEditor(silent) {
   var was = editing;
   editing = null;
   inlineInput.hidden = true;
+  fmtStrip.hidden = true;
   if (!silent) {
     var now = stateJSON();
     if (now !== was.before) { snapshot = was.before; commit(); }
@@ -3648,8 +3793,55 @@ function closeEditor(silent) {
 
 inlineInput.addEventListener("input", applyEditor);
 inlineInput.addEventListener("pointerdown", function (e) { e.stopPropagation(); });
+/* Formatting single words while typing: wraps the selection (or the word
+   under the caret) in a marker, or takes the marker off if it is
+   already there. */
+var FORMAT_KEYS = [
+  ["**", "B", "fmt-b", "Bold", MOD + "+B"], ["*", "I", "fmt-i", "Italic", MOD + "+I"],
+  ["++", "U", "fmt-u", "Underline", MOD + "+U"], ["~~", "S", "fmt-s", "Strikethrough", MOD + "+Shift+X"],
+  ["`", "", "", "Inline code", MOD + "+E"]
+];
+function toggleMarker(mark) {
+  var el = inlineInput, v = el.value, a = el.selectionStart, b = el.selectionEnd, L = mark.length;
+  if (a === b) {
+    while (a > 0 && /\S/.test(v[a - 1])) a--;
+    while (b < v.length && /\S/.test(v[b])) b++;
+  }
+  while (a < b && /\s/.test(v[a])) a++;
+  while (b > a && /\s/.test(v[b - 1])) b--;
+  var before = v.slice(a - L, a), after = v.slice(b, b + L);
+  /* a lone * next to ** belongs to the bold marker, not to italics */
+  var boldStar = mark === "*" && v[a - 2] === "*" && v[b + 1] === "*" && v[a - 3] !== "*";
+  if (before === mark && after === mark && !boldStar) {
+    v = v.slice(0, a - L) + v.slice(a, b) + v.slice(b + L); a -= L; b -= L;
+  } else if (b - a > 2 * L && v.slice(a, a + L) === mark && v.slice(b - L, b) === mark) {
+    v = v.slice(0, a) + v.slice(a + L, b - L) + v.slice(b); b -= 2 * L;
+  } else if (a === b) {
+    v = v.slice(0, a) + mark + mark + v.slice(b); a += L; b = a;
+  } else {
+    v = v.slice(0, a) + mark + v.slice(a, b) + mark + v.slice(b); a += L; b += L;
+  }
+  el.value = v;
+  el.setSelectionRange(a, b);
+  applyEditor();
+}
+var fmtStrip = $("fmtStrip");
+FORMAT_KEYS.forEach(function (f) {
+  var b = toolButton({ icon: f[0] === "`" ? "code" : null, label: f[1] || null, labelClass: f[2] || null, title: f[3] + "  (" + f[4] + ")" });
+  b.addEventListener("pointerdown", function (e) { e.preventDefault(); e.stopPropagation(); });
+  b.addEventListener("mousedown", function (e) { e.preventDefault(); });
+  b.addEventListener("click", function (e) { e.preventDefault(); toggleMarker(f[0]); });
+  fmtStrip.appendChild(b);
+});
+
 inlineInput.addEventListener("keydown", function (event) {
   event.stopPropagation();
+  if ((event.metaKey || event.ctrlKey) && !event.altKey) {
+    var key = event.key.toLowerCase();
+    var mark = key === "b" ? "**" : key === "i" ? "*" : key === "u" ? "++" : key === "e" || key === "`" ? "`" :
+               key === "x" && event.shiftKey ? "~~" : null;
+    if (mark) { event.preventDefault(); toggleMarker(mark); return; }
+  }
   if (event.key === "Escape") { event.preventDefault(); closeEditor(); return; }
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); closeEditor(); return; }
   if (event.key === "Enter" && !event.shiftKey && editing && (editing.kind !== "node" || parseCell(editing.field))) {
@@ -4121,7 +4313,7 @@ function buildEdgeBubble(edge) {
     if (!table || table.type !== "table") return;
     var options = [["", "Whole side"]].concat(table.cells.map(function (row, r) {
       var words = row.filter(Boolean)[0];
-      return [String(r), "Row " + (r + 1) + (words ? ": " + words.split("\n")[0].slice(0, 18) : "")];
+      return [String(r), "Row " + (r + 1) + (words ? ": " + plainText(words).split("\n")[0].slice(0, 18) : "")];
     }));
     var now = edgeRow(table, edge[end[1]]);
     bubble.appendChild(selectControl(options, now == null ? "" : String(now), end[3], function (v) {
@@ -4826,9 +5018,9 @@ function itemName(id) {
   var f = findAny(id);
   if (!f) return { label: "", icon: "box", dim: true };
   var it = f.item;
-  if (f.kind === "text") return { label: it.text.split("\n")[0] || "Empty text", icon: "text", dim: !it.text };
+  if (f.kind === "text") return { label: plainText(it.text).split("\n")[0] || "Empty text", icon: "text", dim: !it.text };
   if (f.kind === "edge") {
-    if (it.label) return { label: it.label, icon: "connect" };
+    if (it.label) return { label: plainText(it.label), icon: "connect" };
     var a = findNode(it.from), b = findNode(it.to);
     return { label: "Arrow: " + shortName(a) + " → " + shortName(b), icon: "connect", dim: true };
   }
@@ -4836,15 +5028,15 @@ function itemName(id) {
   if (it.type === "ink") return { label: "Drawing", icon: "pen", dim: true };
   if (it.type === "table") {
     var first = [].concat.apply([], it.cells).filter(Boolean)[0];
-    return { label: first ? "Table: " + first : "Table", icon: "table", dim: !first };
+    return { label: first ? "Table: " + plainText(first).split("\n")[0] : "Table", icon: "table", dim: !first };
   }
   var kinds = { box: "Box", diamond: "Diamond", ellipse: "Ellipse", pill: "Pill", note: "Note" };
-  var title = (it.title || "").split("\n")[0];
+  var title = plainText(it.title || "").split("\n")[0];
   return { label: title || kinds[it.type] || "Shape", icon: it.style === "sketch" ? "sketch" : it.type, dim: !title };
 }
 function shortName(node) {
   if (!node) return "?";
-  return (node.title || "").split("\n")[0] || (node.type === "image" ? "image" : node.type);
+  return plainText(node.title || "").split("\n")[0] || (node.type === "image" ? "image" : node.type);
 }
 
 /* Moves entries to the start zone, into a step, or into the gap before
@@ -5642,6 +5834,7 @@ function showShortcuts() {
      [MOD + " + Z", "Undo"], [MOD + " + Shift + Z", "Redo"],
      [MOD + " + C  V  X", "Copy, paste, cut"], [MOD + " + D", "Duplicate"],
      [MOD + " + Alt + C  V", "Copy a style, paste it onto the selection"],
+     [MOD + " + B  I  U  E", "While typing: bold, italic, underline or code for the selected words"],
      [MOD + " + A", "Select everything"], ["Delete", "Remove the selection"],
      ["Arrows", "Nudge by one"], ["Shift + arrows", "Nudge by ten"],
      ["Space + drag", "Move around the canvas"], ["Right drag", "Move around the canvas"], ["Scroll", "Move around the canvas"],
