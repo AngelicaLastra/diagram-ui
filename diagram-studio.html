@@ -1694,7 +1694,14 @@ function borderStyle(node) {
   if (BORDER_DASH.hasOwnProperty(node.border)) return node.border;
   return node.style !== "sketch" && !node.filled ? "dashed" : "solid";
 }
-function borderDash(node) { return BORDER_DASH[borderStyle(node)]; }
+/* Outline thickness, in px against the usual 2: every stroke that draws
+   a shape's edge scales by it, and dashes and dots stretch along so a
+   heavy dotted border still reads as dots. */
+function borderScale(node) { return clamp(+node.borderW || 2, 0.5, 12) / 2; }
+function borderDash(node) {
+  var dash = BORDER_DASH[borderStyle(node)], k = Math.max(1, borderScale(node));
+  return dash && dash.split(" ").map(function (v) { return +(v * k).toFixed(2); }).join(" ");
+}
 
 function drawSketchBody(node, shapeGroup, corners, jitter, random) {
   var dash = borderDash(node);
@@ -1739,7 +1746,7 @@ function drawSketchBody(node, shapeGroup, corners, jitter, random) {
       shapeGroup.appendChild(makeEl("path", {
         d: closedPath(jitterPoints(corners, wobble * (0.75 + k * 0.6), random), wobble, random),
         fill: "none", stroke: node.accent,
-        "stroke-width": (2 + random() * 1.1).toFixed(2),
+        "stroke-width": ((2 + random() * 1.1) * borderScale(node)).toFixed(2),
         "stroke-opacity": 0.78, "stroke-linecap": "round", "stroke-dasharray": dash
       }));
     }
@@ -1749,7 +1756,7 @@ function drawSketchBody(node, shapeGroup, corners, jitter, random) {
     shapeGroup.appendChild(makeEl("path", {
       d: sidePath(moved[i], moved[(i + 1) % moved.length], wobble, random),
       fill: "none", stroke: node.accent,
-      "stroke-width": (2.3 + random() * 1.3).toFixed(2),
+      "stroke-width": ((2.3 + random() * 1.3) * borderScale(node)).toFixed(2),
       "stroke-opacity": 0.92, "stroke-linecap": "round", "stroke-dasharray": dash
     }));
   }
@@ -2236,26 +2243,26 @@ function drawNode(node) {
       if (node.type !== "table") {
         shapeGroup.appendChild(makeEl("path", {
           d: wobblyPath(corners, jitter * 0.6, random), fill: "none", stroke: node.accent,
-          "stroke-width": 2, "stroke-opacity": WASH_EDGE, "stroke-linecap": "round",
+          "stroke-width": 2 * borderScale(node), "stroke-opacity": WASH_EDGE, "stroke-linecap": "round",
           "stroke-dasharray": borderDash(node)
         }));
       }
     } else if (isCurvy(node)) {
       shapeGroup.appendChild(makeEl("path", {
         d: wobblyPath(corners, jitter * 0.6, random), fill: "none", stroke: node.accent,
-        "stroke-width": 2.4, "stroke-opacity": WASH_EDGE * 0.85, "stroke-linecap": "round"
+        "stroke-width": 2.4 * borderScale(node), "stroke-opacity": WASH_EDGE * 0.85, "stroke-linecap": "round"
       }));
     } else {
       shapeGroup.appendChild(makeEl("path", {
         d: sidePath(corners[corners.length - 1], corners[0], jitter * 0.6, random),
-        fill: "none", stroke: node.accent, "stroke-width": 3.2,
+        fill: "none", stroke: node.accent, "stroke-width": 3.2 * borderScale(node),
         "stroke-opacity": WASH_EDGE, "stroke-linecap": "round"
       }));
     }
   } else {
     shapeGroup.appendChild(makeEl("path", {
       d: wobblyPath(corners, jitter, random), fill: "none", stroke: node.accent,
-      "stroke-width": borderStyle(node) === "dotted" ? 2 : 1.6, "stroke-dasharray": borderDash(node), "stroke-linecap": "round"
+      "stroke-width": (borderStyle(node) === "dotted" ? 2 : 1.6) * borderScale(node), "stroke-dasharray": borderDash(node), "stroke-linecap": "round"
     }));
   }
 
@@ -2313,7 +2320,7 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
   if (node.style !== "sketch") {
     shapeGroup.appendChild(makeEl("path", Object.assign({
       d: wobblyPath(cornersFor(node), jitter * 0.5, random),
-      "stroke-width": borderDash(node) ? 1.8 : 1.4, "stroke-opacity": borderDash(node) ? 0.85 : 0.55,
+      "stroke-width": (borderDash(node) ? 1.8 : 1.4) * borderScale(node), "stroke-opacity": borderDash(node) || borderScale(node) > 1 ? 0.85 : 0.55,
       "stroke-dasharray": borderDash(node)
     }, ink)));
   }
@@ -3473,7 +3480,7 @@ function kindOf(found) {
 function styleOf(found) {
   var it = found.item, kind = kindOf(found), st = { kind: kind };
   if (kind === "shape" || kind === "table") {
-    st.line = it.accent; st.fill = it.fill; st.filled = it.filled; st.style = it.style; st.border = borderStyle(it);
+    st.line = it.accent; st.fill = it.fill; st.filled = it.filled; st.style = it.style; st.border = borderStyle(it); st.borderW = +it.borderW || 2;
     st.textColor = it.titleColor; st.size = it.titleSize;
     if (kind === "table") st.header = !!it.header;
   } else if (kind === "edge") {
@@ -3499,7 +3506,7 @@ function applyStyle(found, st) {
   var same = st.kind === kind || ((st.kind === "shape" || st.kind === "table") && (kind === "shape" || kind === "table"));
   function set(key, v) { if (v !== undefined && v !== null) it[key] = v; }
   if (kind === "shape" || kind === "table") {
-    set("accent", st.line); set("fill", st.fill); set("filled", st.filled); set("style", st.style); set("border", st.border);
+    set("accent", st.line); set("fill", st.fill); set("filled", st.filled); set("style", st.style); set("border", st.border); set("borderW", st.borderW);
     set("titleColor", st.textColor);
     if (same) set("titleSize", st.size);
     if (kind === "table" && st.kind === "table") set("header", st.header);
@@ -4789,6 +4796,9 @@ function buildShapeLook(shapes) {
       onClick: function () { patchSelected(onlyShapes({ border: b[0] })); }
     }));
   });
+  bubble.appendChild(numberControl(+first.borderW || 2, 0.5, 12, "Outline thickness", function (v) {
+    patchSelected(onlyShapes({ borderW: v }));
+  }, 0.5));
   bubble.appendChild(divider());
 
   bubble.appendChild(paletteRow(allOf(shapes, function (n) { return n.fill === first.fill; }) ? first.fill : null, function (preset) {
