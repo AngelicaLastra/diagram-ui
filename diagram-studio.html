@@ -3019,11 +3019,23 @@ function makeNode(type, style, at, tone) {
 
 /* Rows and columns keep their size, so the table grows or shrinks
    around them instead of squashing what is already there. */
+/* An inserted row or column pushes merged regions after it along, and
+   widens any it lands inside. */
+function makeRoomInMerges(node, axis, at) {
+  tableMerges(node).forEach(function (m) {
+    var start = axis === "r" ? m.r : m.c, len = axis === "r" ? m.rs : m.cs;
+    if (start >= at) { if (axis === "r") m.r++; else m.c++; }
+    else if (at < start + len) { if (axis === "r") m.rs++; else m.cs++; }
+  });
+}
 function addTableRow(node, at) {
   if (!node.aligns || !node.inks) syncFills(node);
   var t = tableSize(node);
   var r = at == null ? t.rows : at;
-  if (r < t.rows) shiftEdgeRows(node.id, function (row) { return row >= r ? row + 1 : row; });
+  if (r < t.rows) {
+    shiftEdgeRows(node.id, function (row) { return row >= r ? row + 1 : row; });
+    makeRoomInMerges(node, "r", r);
+  }
   node.cells.splice(r, 0, node.cells[0].map(function () { return ""; }));
   node.fills.splice(r, 0, node.cells[0].map(function () { return null; }));
   node.aligns.splice(r, 0, node.cells[0].map(function () { return null; }));
@@ -3036,6 +3048,7 @@ function addTableCol(node, at) {
   if (!node.aligns || !node.inks) syncFills(node);
   var t = tableSize(node), ws = colWidths(node);
   var c = at == null ? t.cols : at, fresh = node.w / t.cols;
+  if (c < t.cols) makeRoomInMerges(node, "c", c);
   node.cells.forEach(function (row) { row.splice(c, 0, ""); });
   node.fills.forEach(function (row) { row.splice(c, 0, null); });
   node.aligns.forEach(function (row) { row.splice(c, 0, null); });
@@ -3102,6 +3115,14 @@ function editTables(change) {
     var t = tableSize(n), mine = pick && pick.node === n;
     if (change === "addRow") addTableRow(n);
     if (change === "addCol") addTableCol(n);
+    if (mine && (change === "rowAbove" || change === "rowBelow")) {
+      addTableRow(n, change === "rowAbove" ? pick.r0 : pick.r1 + 1);
+      if (change === "rowAbove") { activeCell.r++; activeCell.r2++; }
+    }
+    if (mine && (change === "colLeft" || change === "colRight")) {
+      addTableCol(n, change === "colLeft" ? pick.c0 : pick.c1 + 1);
+      if (change === "colLeft") { activeCell.c++; activeCell.c2++; }
+    }
     if (change === "dropRow" && !deleteTableSpan(n, "r", mine ? pick.r0 : t.rows - 1, mine ? pick.r1 : t.rows - 1)) {
       toast("A table needs at least one row");
     }
@@ -4795,7 +4816,19 @@ function buildNodeBubble(node) {
      ["addCol", "colAdd", "Add a column"],
      ["dropCol", "colDel", pick ? span(pick.c0, pick.c1, "Delete column", "Delete columns") : "Remove the last column"]]
       .forEach(function (a) {
-        bubble.appendChild(toolButton({ icon: a[1], title: a[2], onClick: function () { editTables(a[0]); } }));
+        var sides = pick && a[0] === "addRow" ? [["rowAbove", "Insert row above", "up"], ["rowBelow", "Insert row below", "down"]]
+                  : pick && a[0] === "addCol" ? [["colLeft", "Insert column left", "alignLeft"], ["colRight", "Insert column right", "alignRight"]]
+                  : null;
+        bubble.appendChild(toolButton({
+          icon: a[1], title: sides ? (a[0] === "addRow" ? "Insert a row above or below" : "Insert a column left or right") : a[2],
+          onClick: function (e, b) {
+            if (!sides) { editTables(a[0]); return; }
+            var rc = b.getBoundingClientRect();
+            openMenuAt(rc.left, rc.bottom + 6, sides.map(function (sd) {
+              return { label: sd[1], icon: sd[2], run: function () { editTables(sd[0]); } };
+            }).concat(["-", { label: a[0] === "addRow" ? "Add a row at the end" : "Add a column at the end", run: function () { editTables(a[0]); } }]));
+          }
+        }));
       });
     var cur = currentCell();
     if (cur) {
