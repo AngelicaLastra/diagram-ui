@@ -4623,6 +4623,10 @@ function renderColorPicker(focusHex) {
 
   if (focusHex) window.requestAnimationFrame(function () { hexInput.focus(); hexInput.select(); });
 }
+/* A number box. Typed digits wait until Enter or a click elsewhere, so
+   "24" is not cut short at "2" (and clamped to the minimum) halfway
+   through; Esc puts the old value back. The arrow keys and the
+   spinner's own arrows still apply at once, a step at a time. */
 function numberControl(value, min, max, title, onChange, step) {
   var input = htmlEl("input", "num");
   input.type = "number";
@@ -4630,10 +4634,25 @@ function numberControl(value, min, max, title, onChange, step) {
   input.value = value;
   input.dataset.tip = title;
   input.setAttribute("aria-label", title);
-  input.addEventListener("input", function () {
+  var applied = value, typed = false;
+  function apply() {
     var v = parseFloat(input.value);
-    if (!isNaN(v)) onChange(clamp(v, min, max));
+    if (isNaN(v)) { input.value = applied; return; }
+    v = clamp(v, min, max);
+    input.value = v;
+    if (v !== applied) { applied = v; onChange(v); }
+  }
+  input.addEventListener("keydown", function (e) {
+    typed = e.key.length === 1 || e.key === "Backspace" || e.key === "Delete";
+    if (e.key === "Enter") { e.preventDefault(); apply(); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); input.value = applied; input.blur(); }
   });
+  input.addEventListener("input", function () {
+    if (typed) { typed = false; return; }   /* still typing: wait */
+    apply();                                 /* arrow key or spinner: now */
+  });
+  input.addEventListener("change", apply);
+  input.addEventListener("blur", apply);
   return input;
 }
 function selectControl(options, value, title, onChange) {
@@ -5040,7 +5059,22 @@ function buildImageBubble(node) {
   }));
 }
 
+/* Rebuilding the bar replaces its controls, so the one being used (a
+   number box stepped with the arrow keys, say) gets its focus back. */
 function renderBubble() {
+  var active = document.activeElement, keep = active && bubble.contains(active) ? active.getAttribute("aria-label") : null;
+  buildBubble();
+  if (!keep) return;
+  var again = [].filter.call(bubble.querySelectorAll("[aria-label]"), function (el) { return el.getAttribute("aria-label") === keep; })[0];
+  if (again) again.focus();
+}
+/* A press anywhere else applies a half-typed number first, while the
+   thing it belongs to is still selected. */
+document.addEventListener("pointerdown", function (e) {
+  var a = document.activeElement;
+  if (a && a.classList && a.classList.contains("num") && a !== e.target) a.blur();
+}, true);
+function buildBubble() {
   clear(bubble);
   var list = selList();
   if (tool === "pen" && !list.length && !editing && !drag) { bubble.hidden = false; buildPenBar(); return; }
