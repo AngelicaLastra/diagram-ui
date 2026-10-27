@@ -5755,14 +5755,23 @@ function fileMenu() {
     { label: "PNG  ·  1×", icon: "image", run: function () { exportPng(1); } },
     { label: "PNG  ·  2×", icon: "image", run: function () { exportPng(2); } },
     { label: "PNG  ·  3×", icon: "image", run: function () { exportPng(3); } },
-    { label: "SVG", icon: "code", run: exportSvg },
+    { label: "SVG", icon: "code", run: function () { exportSvg(); } },
     { label: "GIF…", icon: "play", run: showGifExport },
     { label: "Video (MP4)…", icon: "play", run: showVideoExport },
-    { label: "Standalone web page", icon: "code", run: exportHtml },
+    { label: "Standalone web page", icon: "code", run: function () { exportHtml(); } }
+  ].concat(selectionScope() ? (function (only) {
+    var count = sel.size;
+    return [
+      { header: "Selected items only (" + count + ")" },
+      { label: "PNG  ·  2×", icon: "image", run: function () { exportPng(2, only); } },
+      { label: "SVG", icon: "code", run: function () { exportSvg(only); } },
+      { label: "Standalone web page", icon: "code", run: function () { exportHtml(only); } }
+    ];
+  })(selectionScope()) : []).concat([
     "-",
     { label: "Load the sample", icon: "eye", run: function () { loadSample(); toast("Sample loaded"); } },
     { label: "Keyboard shortcuts", icon: "help", key: "?", run: showShortcuts }
-  ];
+  ]);
 }
 function editMenu() {
   return [
@@ -6393,8 +6402,27 @@ $("orderReset").addEventListener("click", function () {
    ================================================================ */
 /* The area an export covers: everything drawn plus a margin, or what is in
    view when the sheet is empty. */
-function exportBox() {
-  var b = contentBounds(), pad = 32;
+/* The items a "selected only" export keeps: what is selected, plus any
+   arrow whose two ends are both selected. Null means the whole sheet. */
+function selectionScope() {
+  if (!sel.size) return null;
+  var ids = new Set(sel);
+  edges().forEach(function (e) { if (ids.has(e.from) && ids.has(e.to)) ids.add(e.id); });
+  return ids;
+}
+/* The box around just these items, read from the drawn sheet. */
+function scopeBounds(only) {
+  var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  Array.prototype.forEach.call(stage.querySelectorAll("#shapes [data-key], #labels [data-key]"), function (g) {
+    if (!only.has(g.getAttribute("data-key")) || !g.childNodes.length) return;
+    var b = g.getBBox();
+    if (!b.width && !b.height) return;
+    x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.width); y1 = Math.max(y1, b.y + b.height);
+  });
+  return x0 === Infinity ? null : { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+function exportBox(only) {
+  var b = only ? scopeBounds(only) : contentBounds(), pad = 32;
   if (!b) return { x: Math.round(view.x), y: Math.round(view.y), w: Math.round(view.w), h: Math.round(view.h) };
   return {
     x: Math.floor(b.x - pad), y: Math.floor(b.y - pad),
@@ -6407,12 +6435,17 @@ function exportBox() {
    every GIF frame lines up. */
 function buildSvgString(withSize, opts) {
   opts = opts || {};
-  var box = opts.box || exportBox();
+  var box = opts.box || exportBox(opts.only);
   var copy = stage.cloneNode(true);
   ["overlay", "hits"].concat(opts.transparent ? ["bg", "gridRect"] : []).forEach(function (id) {
     var g = copy.querySelector("#" + id);
     if (g) g.parentNode.removeChild(g);
   });
+  if (opts.only) {
+    Array.prototype.forEach.call(copy.querySelectorAll("[data-key]"), function (g) {
+      if (!opts.only.has(g.getAttribute("data-key"))) g.parentNode.removeChild(g);
+    });
+  }
   Array.prototype.forEach.call(copy.querySelectorAll("[data-key]"), function (g) {
     g.style.opacity = opts.opacityOf ? String(opts.opacityOf(g.getAttribute("data-key"))) : "";
   });
@@ -6442,9 +6475,9 @@ function download(filename, data, type) {
 function fileBase() {
   return (doc.title || "diagram").replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-").toLowerCase() || "diagram";
 }
-function exportPng(scale) {
-  var p = exportBox();
-  var svgBlob = new Blob([buildSvgString(true, { box: p })], { type: "image/svg+xml;charset=utf-8" });
+function exportPng(scale, only) {
+  var p = exportBox(only);
+  var svgBlob = new Blob([buildSvgString(true, { box: p, only: only })], { type: "image/svg+xml;charset=utf-8" });
   var url = URL.createObjectURL(svgBlob);
   var image = new Image();
   image.onload = function () {
@@ -6454,7 +6487,7 @@ function exportPng(scale) {
     URL.revokeObjectURL(url);
     canvas.toBlob(function (blob) {
       if (!blob) { toast("This browser could not make the PNG. Try SVG."); return; }
-      download(fileBase() + "@" + scale + "x.png", blob);
+      download(fileBase() + (only ? "-selection" : "") + "@" + scale + "x.png", blob);
       toast("Saved the PNG at " + scale + "×");
     }, "image/png");
   };
@@ -6643,8 +6676,20 @@ function rasterize(svg, w, h, done, fail) {
 /* The frames follow Play: the same order, the same speed setting and
    the same 200ms fade (skipped when transparent, since GIF has no soft
    edges). The last frame holds so the finished sheet can be read. */
+/* The reveal with only the given items in it: steps left empty go, and
+   their pauses with them. */
+function scopedReveal(only) {
+  var r = revealSteps();
+  if (!only) return r;
+  var steps = [], pauses = [];
+  r.steps.forEach(function (st, i) {
+    var kept = st.filter(function (e) { return only.has(e.id); });
+    if (kept.length) { steps.push(kept); pauses.push(r.pauses[i]); }
+  });
+  return { start: r.start.filter(function (k) { return only.has(k); }), steps: steps, pauses: pauses, endPause: r.endPause, custom: r.custom };
+}
 function gifPlan(opts) {
-  var plan = revealSteps(), steps = plan.steps;
+  var plan = scopedReveal(opts.only), steps = plan.steps;
   if (!opts.animated || !steps.length) return { steps: steps, frames: [{ all: true, delay: 0 }] };
   var step = parseInt($("speed").value, 10) || 700;
   var frames = [{ visible: 0, partial: 0, delay: 500 }];
@@ -6664,7 +6709,7 @@ function gifPlan(opts) {
 function exportGif(opts, onProgress, onDone, onFail) {
   stopReveal();
   sel.clear(); closeEditor(true); render();
-  var box = exportBox(), w = Math.round(box.w * opts.scale), h = Math.round(box.h * opts.scale);
+  var box = exportBox(opts.only), w = Math.round(box.w * opts.scale), h = Math.round(box.h * opts.scale);
   var plan = gifPlan(opts), timeline = {};
   plan.steps.forEach(function (st, i) {
     st.forEach(function (e) {
@@ -6676,7 +6721,7 @@ function exportGif(opts, onProgress, onDone, onFail) {
 
   function svgFor(f) {
     return buildSvgString(true, {
-      box: box,
+      box: box, only: opts.only,
       transparent: !opts.background,
       /* how far each step has got at this frame: done, fading, or not yet */
       opacityOf: function (key) {
@@ -6735,8 +6780,27 @@ function exportGif(opts, onProgress, onDone, onFail) {
   return job;
 }
 
+/* The GIF and video dialogs remember the selection they were opened
+   with, since exporting clears it from the screen. */
+var exportPick = null;
+function exportScopeRow(m, options, redraw) {
+  if (!exportPick) { options.only = null; return; }
+  var row = htmlEl("div", "gif-row");
+  row.appendChild(htmlEl("span", "gif-label", "Export"));
+  var seg = htmlEl("span", "gif-seg");
+  [[false, "Whole sheet"], [true, "Selected items (" + sel.size + ")"]].forEach(function (opt) {
+    seg.appendChild(toolButton({
+      label: opt[1], pressed: !!options.only === opt[0],
+      onClick: function () { options.only = opt[0] ? exportPick : null; redraw(); }
+    }));
+  });
+  row.appendChild(seg);
+  m.appendChild(row);
+}
 function showGifExport() {
   closeMenus();
+  exportPick = selectionScope();
+  gifOptions.only = gifOptions.only && exportPick ? exportPick : null;
   openModal(function (m) {
     var o = gifOptions;
     m.appendChild(htmlEl("h2", null, "Export a GIF"));
@@ -6758,6 +6822,7 @@ function showGifExport() {
       row.appendChild(group);
       m.appendChild(row);
     }
+    exportScopeRow(m, o, showGifExport);
     choice("Motion", [[true, "Animated reveal"], [false, "Still picture"]], o.animated, function (v) { o.animated = v; });
     choice("Background", [[true, "Paper"], [false, "Transparent"]], o.background, function (v) { o.background = v; });
     choice("Size", [[1, "1×"], [2, "2×"]], o.scale, function (v) { o.scale = v; });
@@ -6803,8 +6868,8 @@ var videoOptions = { scale: 1 };
 var videoJob = null;
 
 /* When each item appears and goes, in ms from the start of the video. */
-function videoTimeline() {
-  var plan = revealSteps(), step = parseInt($("speed").value, 10) || 700;
+function videoTimeline(only) {
+  var plan = scopedReveal(only), step = parseInt($("speed").value, 10) || 700;
   var at = 0, times = {};
   plan.steps.forEach(function (st, i) {
     at += (i ? step : 0) + plan.pauses[i] * 1000;
@@ -6911,10 +6976,10 @@ function buildMp4(samples, avcC, w, h) {
 function exportVideo(opts, onProgress, onDone, onFail) {
   stopReveal();
   sel.clear(); closeEditor(true); render();
-  var box = exportBox(), scale = opts.scale;
+  var box = exportBox(opts.only), scale = opts.scale;
   if (Math.max(box.w, box.h) * scale > VIDEO_MAX) scale = VIDEO_MAX / Math.max(box.w, box.h);
   var w = Math.max(2, Math.floor(box.w * scale / 2) * 2), h = Math.max(2, Math.floor(box.h * scale / 2) * 2);
-  var plan = videoTimeline(), total = Math.ceil(plan.duration / 1000 * VIDEO_FPS);
+  var plan = videoTimeline(opts.only), total = Math.ceil(plan.duration / 1000 * VIDEO_FPS);
   var job = { cancelled: false };
   var canvas = document.createElement("canvas");
   canvas.width = w; canvas.height = h;
@@ -6944,7 +7009,7 @@ function exportVideo(opts, onProgress, onDone, onFail) {
       if (look === lastLook && !flowingEdges().length) { then(); return; }
       lastLook = look;
       drawFlows(ms);   /* balls where they are at this moment of the video */
-      var svg = buildSvgString(true, { box: box, opacityOf: function (key) { return videoOpacity(plan.times, key, ms); } });
+      var svg = buildSvgString(true, { box: box, only: opts.only, opacityOf: function (key) { return videoOpacity(plan.times, key, ms); } });
       var url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
       var image = new Image();
       image.onload = function () {
@@ -6983,14 +7048,17 @@ function exportVideo(opts, onProgress, onDone, onFail) {
 
 function showVideoExport() {
   closeMenus();
+  exportPick = selectionScope();
+  videoOptions.only = videoOptions.only && exportPick ? exportPick : null;
   openModal(function (m) {
     var o = videoOptions;
-    var plan = videoTimeline();
+    var plan = videoTimeline(o.only);
     m.appendChild(htmlEl("h2", null, "Export a video"));
     var speedName = $("speed").options[$("speed").selectedIndex].text.toLowerCase();
     m.appendChild(htmlEl("p", "sub", "An MP4 of the reveal, the same as Play at your " + speedName +
       " speed, with every pause and hide, then a hold on the finished sheet. About " +
       Math.round(plan.duration / 100) / 10 + " seconds."));
+    exportScopeRow(m, o, showVideoExport);
     var row = htmlEl("div", "gif-row");
     row.appendChild(htmlEl("span", "gif-label", "Size"));
     var seg = htmlEl("span", "gif-seg");
@@ -7029,9 +7097,12 @@ function showVideoExport() {
   });
 }
 
-function exportSvg() { download(fileBase() + ".svg", buildSvgString(true), "image/svg+xml"); toast("Saved the SVG"); }
-function exportHtml() {
-  var body = buildSvgString(false);
+function exportSvg(only) {
+  download(fileBase() + (only ? "-selection" : "") + ".svg", buildSvgString(true, { only: only }), "image/svg+xml");
+  toast(only ? "Saved the selection as SVG" : "Saved the SVG");
+}
+function exportHtml(only) {
+  var body = buildSvgString(false, { only: only });
   var html = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n" +
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n" +
     "<title>" + (doc.title || "Diagram").replace(/[<>&]/g, "") + "</title>\n" +
@@ -7040,7 +7111,7 @@ function exportHtml() {
     "figure{margin:0;max-width:1000px;width:100%}svg{width:100%;height:auto;background:#fff;border:1px solid #E4E0D6;border-radius:10px;box-shadow:0 2px 10px rgba(35,35,31,.07)}" +
     "figcaption{margin-top:12px;color:#8C8A80;font-size:13px;text-align:center}</style>\n</head>\n<body>\n<figure>\n" +
     body + "\n<figcaption>" + (doc.title || "Diagram").replace(/[<>&]/g, "") + "</figcaption>\n</figure>\n</body>\n</html>\n";
-  download(fileBase() + ".html", html, "text/html");
+  download(fileBase() + (only ? "-selection" : "") + ".html", html, "text/html");
   toast("Saved a standalone page");
 }
 function saveJson() {
