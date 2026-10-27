@@ -1322,6 +1322,19 @@ function syncFills(node) {
   node.inks = node.cells.map(function (row, r) {
     return row.map(function (_, c) { return parseHex(inked[r] && inked[r][c]) || null; });
   });
+  /* and each cell's own bold, italic, underline, strike and size; a
+     missing key follows the table */
+  var styled = Array.isArray(node.fmts) ? node.fmts : [];
+  node.fmts = node.cells.map(function (row, r) {
+    return row.map(function (_, c) {
+      var f = styled[r] && styled[r][c];
+      if (!f || typeof f !== "object") return null;
+      var keep = {};
+      ["b", "i", "u", "s"].forEach(function (k) { if (typeof f[k] === "boolean") keep[k] = f[k]; });
+      if (+f.size > 0) keep.size = clamp(+f.size, 5, 96);
+      return Object.keys(keep).length ? keep : null;
+    });
+  });
 }
 function cellAlign(node, r, c) {
   var a = node.aligns && node.aligns[r] && node.aligns[r][c];
@@ -1337,6 +1350,14 @@ function cellFormat(node, r, c, base) {
     size: node.titleSize || 11.5, bold: node.bold, italic: node.italic,
     strike: node.strike, underline: node.underline
   }, base || {});
+  var own = node.fmts && node.fmts[r] && node.fmts[r][c];
+  if (own) {
+    if ("b" in own) f.bold = own.b;
+    if ("i" in own) f.italic = own.i;
+    if ("u" in own) f.underline = own.u;
+    if ("s" in own) f.strike = own.s;
+    if (own.size) f.size = own.size;
+  }
   f.weight = cellWeight(node, r);
   f.wrapWidth = cellAlign(node, r, c).wrap ? Math.max(10, cellBox(node, r, c).w - CELL_PAD * 2) : null;
   return f;
@@ -1359,8 +1380,8 @@ function fitTableRows(n) {
       row.forEach(function (text, c) {
         var m = mergeAt(n, r, c);
         if (!text || isCovered(n, r, c) || (m && m.rs > 1) || !cellAlign(n, r, c).wrap) return;
-        var lines = cellLineCount(n, r, c);
-        need[r] = Math.max(need[r], Math.ceil(lines * size * 1.25 + CELL_PAD * 2));
+        var lines = cellLineCount(n, r, c), own = cellFormat(n, r, c).size;
+        need[r] = Math.max(need[r], Math.ceil(lines * own * 1.25 + CELL_PAD * 2));
       });
     });
   }
@@ -2363,7 +2384,7 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
       if (!node.cells[r][c] || isCovered(node, r, c)) continue;
       var setting = cellFormat(node, r, c, format);
       if (node.inks && node.inks[r][c]) setting.color = node.inks[r][c];
-      var spot = cellTextSpot(node, r, c, richLines(node.cells[r][c], setting).length, format.size);
+      var spot = cellTextSpot(node, r, c, richLines(node.cells[r][c], setting).length, setting.size);
       setting.anchor = spot.anchor;
       labelGroup.appendChild(styledText(spot.x, spot.y, node.cells[r][c], setting));
     }
@@ -3058,7 +3079,7 @@ function makeRoomInMerges(node, axis, at) {
   });
 }
 function addTableRow(node, at) {
-  if (!node.aligns || !node.inks) syncFills(node);
+  if (!node.aligns || !node.inks || !node.fmts) syncFills(node);
   var t = tableSize(node);
   var r = at == null ? t.rows : at;
   if (r < t.rows) {
@@ -3069,12 +3090,13 @@ function addTableRow(node, at) {
   node.fills.splice(r, 0, node.cells[0].map(function () { return null; }));
   node.aligns.splice(r, 0, node.cells[0].map(function () { return null; }));
   node.inks.splice(r, 0, node.cells[0].map(function () { return null; }));
+  node.fmts.splice(r, 0, node.cells[0].map(function () { return null; }));
   var fresh = node.rowBase || node.h / t.rows;
   if (node.rowH) { var hs = rowHeights(node); hs.splice(r, 0, fresh); node.rowH = hs.map(Math.round); }
   node.h = Math.round(node.h + fresh);
 }
 function addTableCol(node, at) {
-  if (!node.aligns || !node.inks) syncFills(node);
+  if (!node.aligns || !node.inks || !node.fmts) syncFills(node);
   var t = tableSize(node), ws = colWidths(node);
   var c = at == null ? t.cols : at, fresh = node.w / t.cols;
   if (c < t.cols) makeRoomInMerges(node, "c", c);
@@ -3082,6 +3104,7 @@ function addTableCol(node, at) {
   node.fills.forEach(function (row) { row.splice(c, 0, null); });
   node.aligns.forEach(function (row) { row.splice(c, 0, null); });
   node.inks.forEach(function (row) { row.splice(c, 0, null); });
+  node.fmts.forEach(function (row) { row.splice(c, 0, null); });
   ws.splice(c, 0, fresh);
   node.colW = ws.map(function (w) { return Math.round(w); });
   node.w = Math.round(node.w + fresh);
@@ -3110,7 +3133,7 @@ function deleteTableSpan(n, axis, a0, a1) {
     var start = axis === "r" ? m.r : m.c, end = start + (axis === "r" ? m.rs : m.cs) - 1;
     if (start < a0 || start > a1 || a1 + 1 > end) return;
     var r = axis === "r" ? a1 + 1 : m.r, c = axis === "r" ? m.c : a1 + 1;
-    n.cells[r][c] = n.cells[m.r][m.c]; n.fills[r][c] = n.fills[m.r][m.c]; n.aligns[r][c] = n.aligns[m.r][m.c]; n.inks[r][c] = n.inks[m.r][m.c];
+    n.cells[r][c] = n.cells[m.r][m.c]; n.fills[r][c] = n.fills[m.r][m.c]; n.aligns[r][c] = n.aligns[m.r][m.c]; n.inks[r][c] = n.inks[m.r][m.c]; n.fmts[r][c] = n.fmts[m.r][m.c];
   });
   n.merges = merges.map(function (m) {
     var start = axis === "r" ? m.r : m.c, len = axis === "r" ? m.rs : m.cs, end = start + len - 1;
@@ -3121,12 +3144,12 @@ function deleteTableSpan(n, axis, a0, a1) {
   if (axis === "r") {
     shiftEdgeRows(n.id, function (r) { return r < a0 ? r : r > a1 ? r - count : null; });
     var hs = rowHeights(n), lost = hs.splice(a0, count).reduce(function (a, b) { return a + b; }, 0);
-    n.cells.splice(a0, count); n.fills.splice(a0, count); n.aligns.splice(a0, count); n.inks.splice(a0, count);
+    n.cells.splice(a0, count); n.fills.splice(a0, count); n.aligns.splice(a0, count); n.inks.splice(a0, count); n.fmts.splice(a0, count);
     if (n.rowH) n.rowH = hs.map(Math.round);
     n.h = Math.max(MIN_H, Math.round(n.h - lost));
   } else {
     var ws = colWidths(n), gone = ws.splice(a0, count).reduce(function (a, b) { return a + b; }, 0);
-    [n.cells, n.fills, n.aligns, n.inks].forEach(function (grid) { grid.forEach(function (row) { row.splice(a0, count); }); });
+    [n.cells, n.fills, n.aligns, n.inks, n.fmts].forEach(function (grid) { grid.forEach(function (row) { row.splice(a0, count); }); });
     n.colW = ws.map(function (w) { return Math.round(w); });
     n.w = Math.max(MIN_W, Math.round(n.w - gone));
   }
@@ -3140,7 +3163,7 @@ function editTables(change) {
   if (!list.length) return;
   var pick = currentCell(), before = stateJSON();
   list.forEach(function (n) {
-    if (!n.aligns || !n.inks) syncFills(n);
+    if (!n.aligns || !n.inks || !n.fmts) syncFills(n);
     var t = tableSize(n), mine = pick && pick.node === n;
     if (change === "addRow") addTableRow(n);
     if (change === "addCol") addTableCol(n);
@@ -4216,7 +4239,7 @@ function layoutEditor() {
   var cell = parseCell(editing.field);
 
   if (cell) {
-    var size = found.item.titleSize || 11.5;
+    var size = cellFormat(found.item, cell.r, cell.c).size;
     var shownLines = cellLineCount(found.item, cell.r, cell.c, inlineInput.value);
     var at = cellTextSpot(found.item, cell.r, cell.c, shownLines, size), cb = at.box;
     spot = {
@@ -4918,7 +4941,53 @@ function buildNodeBubble(node) {
     shapeTypeControl([node]);
   }
   bubble.appendChild(divider());
-  buildTextLook([node]);
+  if (node.type === "table" && currentCell()) buildCellTextLook(currentCell());
+  else buildTextLook([node]);
+}
+/* With cells picked, the font controls format just those cells: each
+   button shows on when every picked cell is set that way, and pressing
+   it sets them all one way. Cells keep the table's own setting until
+   they are given one. */
+/* Ctrl+B, I or U with cells picked press the cell button in the bar. */
+function cellShortcut(k) {
+  if (!currentCell()) return false;
+  var label = { b: "Bold", i: "Italic", u: "Underline" }[k];
+  var b = [].filter.call(bubble.querySelectorAll("button[aria-label]"), function (el) { return el.getAttribute("aria-label").indexOf(label + " for th") === 0; })[0];
+  if (!b) return false;
+  b.click();
+  return true;
+}
+function buildCellTextLook(cur) {
+  var n = cur.node, cells = [];
+  eachPickedCell(cur, function (r, c) { if (!isCovered(n, r, c)) cells.push({ r: r, c: c, f: cellFormat(n, r, c) }); });
+  function setCells(change) {
+    if (!n.fmts) syncFills(n);
+    cells.forEach(function (cell) {
+      var own = Object.assign({}, n.fmts[cell.r][cell.c] || {});
+      change(own);
+      n.fmts[cell.r][cell.c] = Object.keys(own).length ? own : null;
+    });
+    commit(); render();
+  }
+  var wrap = htmlEl("span");
+  wrap.style.cssText = "display:flex;gap:2px";
+  [["b", "bold", "B", "fmt-b", "Bold"], ["i", "italic", "I", "fmt-i", "Italic"],
+   ["u", "underline", "U", "fmt-u", "Underline"], ["s", "strike", "S", "fmt-s", "Strikethrough"]].forEach(function (k) {
+    var on = cells.every(function (cell) { return !!cell.f[k[1]]; });
+    wrap.appendChild(toolButton({
+      label: k[2], labelClass: k[3], title: k[4] + (cells.length > 1 ? " for these cells" : " for this cell"), pressed: on,
+      onClick: function () { setCells(function (own) { own[k[0]] = !on; }); }
+    }));
+  });
+  bubble.appendChild(wrap);
+  var sizes = cells.map(function (cell) { return cell.f.size; });
+  bubble.appendChild(numberControl(sizes[0], 5, 96, cells.length > 1 ? "Text size for these cells" : "Text size for this cell", function (v) {
+    setCells(function (own) { if (v === (n.titleSize || 11.5)) delete own.size; else own.size = v; });
+  }, 0.5));
+  bubble.appendChild(toolButton({
+    label: "Table text", title: "Format the whole table's text instead (pick no cell, or drag a box round the table)",
+    onClick: function () { activeCell = null; afterSelect(); }
+  }));
 }
 function flowControls(list) {
   var on = list.length > 0 && list.every(function (e) { return e.flow; });
@@ -6880,6 +6949,7 @@ document.addEventListener("keydown", function (event) {
     if (k === "a") { event.preventDefault(); selectAll(); return; }
     if (k === "s") { event.preventDefault(); saveJson(); return; }
     if (k === "o") { event.preventDefault(); $("fileInput").click(); return; }
+    if ((k === "b" || k === "i" || k === "u") && cellShortcut(k)) { event.preventDefault(); return; }
     if (k === "b") { event.preventDefault(); patchSelected({ bold: function (it) { return !it.bold; } }); return; }
     if (k === "i") { event.preventDefault(); patchSelected({ italic: function (it) { return !it.italic; } }); return; }
     if (k === "u") { event.preventDefault(); patchSelected({ underline: function (it) { return !it.underline; } }); return; }
