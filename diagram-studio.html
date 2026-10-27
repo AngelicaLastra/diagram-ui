@@ -275,7 +275,7 @@ svg#stage.painty { cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w
   padding: 5px 6px; background: var(--paper);
   border: 1px solid var(--hair); border-radius: 11px;
   box-shadow: var(--shadow); z-index: 6;
-  flex-wrap: nowrap; white-space: nowrap;
+  flex-wrap: wrap; row-gap: 4px; white-space: nowrap;
 }
 .floating[hidden] { display: none; }
 .floating .btn { height: 26px; min-width: 26px; border-radius: var(--r-s); }
@@ -4942,89 +4942,90 @@ function buildTextLook(items) {
 }
 
 function buildNodeBubble(node) {
+  if (node.type === "table") { buildTableBubble(node); return; }
   buildShapeLook([node]);
   bubble.appendChild(divider());
-
-  if (node.type === "table") {
-    var pick = currentCell();
-    function span(a, b, one, many) { return a === b ? one + " " + (a + 1) : many + " " + (a + 1) + "–" + (b + 1); }
-    [["addRow", "rowAdd", "Add a row"],
-     ["dropRow", "rowDel", pick ? span(pick.r0, pick.r1, "Delete row", "Delete rows") : "Remove the last row"],
-     ["addCol", "colAdd", "Add a column"],
-     ["dropCol", "colDel", pick ? span(pick.c0, pick.c1, "Delete column", "Delete columns") : "Remove the last column"]]
-      .forEach(function (a) {
-        var sides = pick && a[0] === "addRow" ? [["rowAbove", "Insert row above", "up"], ["rowBelow", "Insert row below", "down"]]
-                  : pick && a[0] === "addCol" ? [["colLeft", "Insert column left", "alignLeft"], ["colRight", "Insert column right", "alignRight"]]
-                  : null;
-        bubble.appendChild(toolButton({
-          icon: a[1], title: sides ? (a[0] === "addRow" ? "Insert a row above or below" : "Insert a column left or right") : a[2],
-          onClick: function (e, b) {
-            if (!sides) { editTables(a[0]); return; }
-            var rc = b.getBoundingClientRect();
-            openMenuAt(rc.left, rc.bottom + 6, sides.map(function (sd) {
-              return { label: sd[1], icon: sd[2], run: function () { editTables(sd[0]); } };
-            }).concat(["-", { label: a[0] === "addRow" ? "Add a row at the end" : "Add a column at the end", run: function () { editTables(a[0]); } }]));
-          }
-        }));
-      });
-    var cur = currentCell();
-    if (cur) {
-      /* Show a colour only when every picked cell shares it. */
-      var shades = [];
-      eachPickedCell(cur, function (r, c) { shades.push(cur.node.fills[r][c]); });
-      var now = shades.every(function (f) { return f === shades[0]; }) ? shades[0] : null;
-      var many = shades.length > 1, oneRegion = pickIsOneRegion(cur);
-      bubble.appendChild(divider());
-      bubble.appendChild(htmlEl("span", null, oneRegion ? "Merged cell" : many ? shades.length + " cells" : "Cell"));
-      bubble.appendChild(paletteRow(now, function (preset) { setCellFill(preset.fill); }));
-      bubble.appendChild(colorControl(now || node.fill, many ? "Any colour for these cells" : "Any colour for this cell", setCellFill));
-      /* the text colour of the picked cells, apart from the table's */
-      var inks = [];
-      eachPickedCell(cur, function (r, c) { inks.push(cur.node.inks ? cur.node.inks[r][c] : null); });
-      var inkNow = inks.every(function (x) { return x === inks[0]; }) ? inks[0] : null;
-      bubble.appendChild(htmlEl("span", "bar-label", "Text"));
-      bubble.appendChild(colorControl(inkNow || node.titleColor || INK, many ? "Text colour for these cells" : "Text colour for this cell", setCellInk));
-      if (inks.some(Boolean)) {
-        bubble.appendChild(toolButton({ icon: "trash", title: "Back to the table's text colour", onClick: function () { setCellInk(null); } }));
-      }
-      bubble.appendChild(toolButton({
-        label: "Clear", title: many ? "Take the colour off these cells" : "Take the colour off this cell",
-        disabled: !shades.some(Boolean),
-        onClick: function () { setCellFill(null); }
-      }));
-      if (many && !oneRegion) {
-        bubble.appendChild(toolButton({ icon: "merge", label: "Merge", title: "Merge these cells into one", onClick: mergePicked }));
-      }
-      if (pickedMerges(cur).length) {
-        bubble.appendChild(toolButton({ icon: "unmerge", label: "Unmerge", title: "Split merged cells back apart", onClick: unmergePicked }));
-      }
-      bubble.appendChild(divider());
-    }
+  shapeTypeControl([node]);
+  bubble.appendChild(divider());
+  buildTextLook([node]);
+}
+/* A table's bar puts what tables need first: the Table menu, the picked
+   cells' colours, alignment and text, and only then the general look.
+   Rows, columns, moves, even columns and the header row all live in the
+   Table menu, so the bar stays a sensible length. */
+function buildTableBubble(node) {
+  var cur = currentCell();
+  bubble.appendChild(tableMenuButton(node, cur));
+  if (cur) {
+    /* Show a colour only when every picked cell shares it. */
+    var shades = [];
+    eachPickedCell(cur, function (r, c) { shades.push(cur.node.fills[r][c]); });
+    var now = shades.every(function (f) { return f === shades[0]; }) ? shades[0] : null;
+    var many = shades.length > 1, oneRegion = pickIsOneRegion(cur);
     bubble.appendChild(divider());
-    bubble.appendChild(alignButton(node));
-    bubble.appendChild(wrapButton(node));
-    bubble.appendChild(moveButton(node));
-    if (!evenColumns(node)) {
-      bubble.appendChild(toolButton({
-        label: "Even columns", title: "Make every column the same width",
-        onClick: function () { editTables("evenCols"); }
-      }));
-    }
+    bubble.appendChild(htmlEl("span", null, oneRegion ? "Merged cell" : many ? shades.length + " cells" : "Cell"));
+    bubble.appendChild(colorControl(now || node.fill, many ? "Any colour for these cells" : "Any colour for this cell", setCellFill));
     bubble.appendChild(toolButton({
-      label: "Header", title: "Shade the first row", pressed: !!node.header,
-      onClick: function () { patchSelected({ header: function (it) { return it.type === "table" ? !it.header : undefined; } }); }
+      label: "Clear", title: many ? "Take the colour off these cells" : "Take the colour off this cell",
+      disabled: !shades.some(Boolean),
+      onClick: function () { setCellFill(null); }
     }));
-  } else {
-    shapeTypeControl([node]);
+    /* the text colour of the picked cells, apart from the table's */
+    var inks = [];
+    eachPickedCell(cur, function (r, c) { inks.push(cur.node.inks ? cur.node.inks[r][c] : null); });
+    var inkNow = inks.every(function (x) { return x === inks[0]; }) ? inks[0] : null;
+    bubble.appendChild(htmlEl("span", "bar-label", "Text"));
+    bubble.appendChild(colorControl(inkNow || node.titleColor || INK, many ? "Text colour for these cells" : "Text colour for this cell", setCellInk));
+    if (inks.some(Boolean)) {
+      bubble.appendChild(toolButton({ icon: "trash", title: "Back to the table's text colour", onClick: function () { setCellInk(null); } }));
+    }
+    if (many && !oneRegion) {
+      bubble.appendChild(toolButton({ icon: "merge", label: "Merge", title: "Merge these cells into one", onClick: mergePicked }));
+    }
+    if (pickedMerges(cur).length) {
+      bubble.appendChild(toolButton({ icon: "unmerge", label: "Unmerge", title: "Split merged cells back apart", onClick: unmergePicked }));
+    }
   }
   bubble.appendChild(divider());
-  if (node.type === "table" && currentCell()) buildCellTextLook(currentCell());
-  else buildTextLook([node]);
+  bubble.appendChild(alignButton(node));
+  bubble.appendChild(wrapButton(node));
+  bubble.appendChild(divider());
+  if (cur) buildCellTextLook(cur); else buildTextLook([node]);
+  bubble.appendChild(divider());
+  buildShapeLook([node]);
 }
-/* With cells picked, the font controls format just those cells: each
-   button shows on when every picked cell is set that way, and pressing
-   it sets them all one way. Cells keep the table's own setting until
-   they are given one. */
+function tableMenuButton(node, cur) {
+  function span(a, b, one, many) { return a === b ? one + " " + (a + 1) : many + " " + (a + 1) + "–" + (b + 1); }
+  var rows = node.cells.length, cols = node.cells[0].length;
+  return toolButton({
+    icon: "table", label: "Table", title: "Rows, columns, moving them, and the header row",
+    onClick: function (e, b) {
+      var rc = b.getBoundingClientRect(), items = [{ header: "Rows" }];
+      if (cur) items.push(
+        { label: "Insert row above", icon: "rowAdd", run: function () { editTables("rowAbove"); } },
+        { label: "Insert row below", icon: "rowAdd", run: function () { editTables("rowBelow"); } });
+      items.push({ label: "Add a row at the end", icon: cur ? null : "rowAdd", run: function () { editTables("addRow"); } });
+      items.push({ label: cur ? span(cur.r0, cur.r1, "Delete row", "Delete rows") : "Remove the last row", icon: "rowDel", danger: true,
+                   disabled: rows < 2, run: function () { editTables("dropRow"); } });
+      items.push({ header: "Columns" });
+      if (cur) items.push(
+        { label: "Insert column left", icon: "colAdd", run: function () { editTables("colLeft"); } },
+        { label: "Insert column right", icon: "colAdd", run: function () { editTables("colRight"); } });
+      items.push({ label: "Add a column at the end", icon: cur ? null : "colAdd", run: function () { editTables("addCol"); } });
+      items.push({ label: cur ? span(cur.c0, cur.c1, "Delete column", "Delete columns") : "Remove the last column", icon: "colDel", danger: true,
+                   disabled: cols < 2, run: function () { editTables("dropCol"); } });
+      if (cur) items.push("-",
+        { label: "Move column left", icon: "left", key: "Alt+←", disabled: cur.c0 === 0, run: function () { moveTablePick("c", -1); } },
+        { label: "Move column right", icon: "right", key: "Alt+→", disabled: cur.c1 === cols - 1, run: function () { moveTablePick("c", 1); } },
+        { label: "Move row up", icon: "up", key: "Alt+↑", disabled: cur.r0 === 0, run: function () { moveTablePick("r", -1); } },
+        { label: "Move row down", icon: "down", key: "Alt+↓", disabled: cur.r1 === rows - 1, run: function () { moveTablePick("r", 1); } });
+      items.push("-",
+        { label: "Even columns", disabled: evenColumns(node), run: function () { editTables("evenCols"); } },
+        { label: "Header row", on: !!node.header, run: function () { patchSelected({ header: function (it) { return it.type === "table" ? !it.header : undefined; } }); } });
+      openMenuAt(rc.left, rc.bottom + 6, items);
+    }
+  });
+}
 /* Moves rows (axis "r") or columns ("c") from..fromEnd so they sit
    before index `to` (in today's numbering; the count means the end).
    Everything a row or column carries moves with it: text, fills, text
@@ -5081,24 +5082,6 @@ function moveTablePick(axis, by) {
   else { activeCell.c = where[activeCell.c]; activeCell.c2 = where[activeCell.c2]; }
   commit(); render();
 }
-function moveButton(node) {
-  var cur = currentCell(), rows = node.cells.length, cols = node.cells[0].length;
-  return toolButton({
-    icon: "move", label: "Move", title: "Move the picked rows or columns  (Alt + arrows), or drag the tabs at the table's edges",
-    disabled: !cur,
-    onClick: function (e, b) {
-      var rc = b.getBoundingClientRect();
-      openMenuAt(rc.left, rc.bottom + 6, [
-        { label: "Column left", icon: "left", key: "Alt+←", disabled: cur.c0 === 0, run: function () { moveTablePick("c", -1); } },
-        { label: "Column right", icon: "right", key: "Alt+→", disabled: cur.c1 === cols - 1, run: function () { moveTablePick("c", 1); } },
-        "-",
-        { label: "Row up", icon: "up", key: "Alt+↑", disabled: cur.r0 === 0, run: function () { moveTablePick("r", -1); } },
-        { label: "Row down", icon: "down", key: "Alt+↓", disabled: cur.r1 === rows - 1, run: function () { moveTablePick("r", 1); } }
-      ]);
-    }
-  });
-}
-
 /* Copying and pasting cells, the way a spreadsheet does. Copied cells go
    on the clipboard as tab-separated rows, so they paste into Sheets or
    Excel too. Pasting one value fills every picked cell with it; pasting
@@ -5152,6 +5135,10 @@ function cellShortcut(k) {
   b.click();
   return true;
 }
+/* With cells picked, the font controls format just those cells: each
+   button shows on when every picked cell is set that way, and pressing
+   it sets them all one way. Cells keep the table's own setting until
+   they are given one. */
 function buildCellTextLook(cur) {
   var n = cur.node, cells = [];
   eachPickedCell(cur, function (r, c) { if (!isCovered(n, r, c)) cells.push({ r: r, c: c, f: cellFormat(n, r, c) }); });
@@ -5376,6 +5363,8 @@ function placeBubble() {
   var top = toScreen(box.x + box.w / 2, box.y);
   var bottom = toScreen(box.x + box.w / 2, box.y + box.h);
 
+  bubble.style.maxWidth = Math.max(240, sheetWidth - 16) + "px";
+  rect = bubble.getBoundingClientRect();
   var left = clamp(top.x - rect.width / 2, 8, Math.max(8, sheetWidth - rect.width - 8));
   var y = top.y - rect.height - 14;
   if (y < 8) y = bottom.y + 14;
