@@ -3384,6 +3384,9 @@ document.addEventListener("paste", function (e) {
   });
   e.preventDefault();
   if (files.length) { importImages(files, viewCenter()); return; }
+  /* text pasted with table cells picked goes into the cells */
+  var cellText = data ? data.getData("text/plain") : "";
+  if (currentCell() && cellText && cellText !== "Diagram studio shapes") { pasteIntoCells(cellText); return; }
   /* SVG markup copied from a code editor or a design tool. */
   var text = data ? data.getData("text/plain").trim() : "";
   if (/^(<\?xml[^>]*>\s*)?<svg[\s>]/i.test(text)) {
@@ -5094,6 +5097,50 @@ function moveButton(node) {
       ]);
     }
   });
+}
+
+/* Copying and pasting cells, the way a spreadsheet does. Copied cells go
+   on the clipboard as tab-separated rows, so they paste into Sheets or
+   Excel too. Pasting one value fills every picked cell with it; pasting
+   rows and columns from a spreadsheet (text with tabs) lays them out
+   from the pick's top-left corner instead. */
+function copyCells(cut) {
+  var cur = currentCell();
+  if (!cur) return;
+  var n = cur.node, rows = [];
+  for (var r = cur.r0; r <= cur.r1; r++) {
+    var row = [];
+    for (var c = cur.c0; c <= cur.c1; c++) row.push(isCovered(n, r, c) ? "" : String(n.cells[r][c] || "").replace(/[\t\n]/g, " "));
+    rows.push(row.join("\t"));
+  }
+  var text = rows.join("\n"), count = (cur.r1 - cur.r0 + 1) * (cur.c1 - cur.c0 + 1);
+  try { if (navigator.clipboard) navigator.clipboard.writeText(text).catch(function () {}); } catch (err) { /* not allowed here */ }
+  if (cut) {
+    eachPickedCell(cur, function (r, c) { n.cells[r][c] = ""; });
+    commit(); render();
+  }
+  toast((cut ? "Cut " : "Copied ") + count + (count === 1 ? " cell" : " cells") +
+        (cut ? "" : ". Ctrl+D duplicates the table itself."));
+}
+function pasteIntoCells(text) {
+  var cur = currentCell();
+  if (!cur) return;
+  var n = cur.node, rows = n.cells.length, cols = n.cells[0].length, filled = 0;
+  text = String(text).replace(/\r\n?/g, "\n");
+  if (text.indexOf("\t") >= 0) {
+    text.replace(/\n$/, "").split("\n").forEach(function (line, i) {
+      line.split("\t").forEach(function (value, j) {
+        var r = cur.r0 + i, c = cur.c0 + j;
+        if (r < rows && c < cols && !isCovered(n, r, c)) { n.cells[r][c] = value; filled++; }
+      });
+    });
+  } else {
+    var value = text.replace(/\n$/, "");
+    eachPickedCell(cur, function (r, c) { if (!isCovered(n, r, c)) { n.cells[r][c] = value; filled++; } });
+  }
+  if (!filled) return;
+  commit(); render();
+  toast("Pasted into " + filled + (filled === 1 ? " cell" : " cells"));
 }
 
 /* Ctrl+B, I or U with cells picked press the cell button in the bar. */
@@ -7002,7 +7049,7 @@ function showShortcuts() {
      ["Double click", "Type on a shape, arrow or label"], ["Enter", "Edit whatever is selected"],
      ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
      [MOD + " + Z", "Undo"], [MOD + " + Shift + Z", "Redo"],
-     [MOD + " + C  V  X", "Copy, paste, cut"], [MOD + " + D", "Duplicate"],
+     [MOD + " + C  V  X", "Copy, paste, cut (table cells, when cells are picked)"], [MOD + " + D", "Duplicate"],
      [MOD + " + Alt + C  V", "Copy a style, paste it onto the selection"],
      [MOD + " + B  I  U  E", "While typing: bold, italic, underline or code for the selected words"],
      [MOD + " + A", "Select everything"], ["Delete", "Remove the selection"],
@@ -7102,8 +7149,8 @@ document.addEventListener("keydown", function (event) {
     var k = event.key.toLowerCase();
     if (k === "z") { event.preventDefault(); if (event.shiftKey) redo(); else undo(); return; }
     if (k === "y") { event.preventDefault(); redo(); return; }
-    if (k === "c") { event.preventDefault(); copySelected(); return; }
-    if (k === "x") { event.preventDefault(); copySelected(); deleteSelected(); return; }
+    if (k === "c") { event.preventDefault(); if (currentCell()) copyCells(false); else copySelected(); return; }
+    if (k === "x") { event.preventDefault(); if (currentCell()) copyCells(true); else { copySelected(); deleteSelected(); } return; }
     if (k === "v") return;   /* handled by the paste event, which can see pictures */
     if (k === "d") { event.preventDefault(); duplicateSelected(); return; }
     if (k === "a") { event.preventDefault(); selectAll(); return; }
