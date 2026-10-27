@@ -1399,7 +1399,7 @@ function fitTableRows(n) {
   n.rowH = need;
   n.h = need.reduce(function (a, b) { return a + b; }, 0);
 }
-function fitAllTables() { nodes().forEach(function (n) { fitTableRows(n); fitCode(n); }); }
+function fitAllTables() { nodes().forEach(function (n) { fitTableRows(n); fitCode(n); fitShapeText(n); }); }
 /* Where a cell's text sits. Several lines stay a block, so top and bottom
    move the whole block rather than its middle line. */
 var CELL_PAD = 6;
@@ -2396,15 +2396,62 @@ function drawTableGrid(node, shapeGroup, labelGroup, jitter, random, format) {
   }
 }
 
+/* How wide a shape's words may run: its width less some margin, and
+   less again for diamonds and ellipses so the words stay inside the
+   curve. */
+function textRoom(node) {
+  var k = node.type === "diamond" ? 0.56 : node.type === "ellipse" ? 0.74 : 1;
+  var margin = node.type === "pill" ? node.h * 0.6 : node.type === "note" ? 26 : 18;
+  return Math.max(30, node.w * k - margin);
+}
+/* The title and caption as one block, wrapped to the shape and centred
+   on it. A single short title sits exactly where it always has. */
+function shapeTextLayout(node, format) {
+  var size = format.size, subSize = Math.max(8, size - 2.5), room = textRoom(node);
+  var titleLines = node.title ? richLines(node.title, Object.assign({}, format, { wrapWidth: room })).length : 1;
+  var subLines = node.sub ? richLines(node.sub, { size: subSize, italic: node.italic, wrapWidth: room }).length : 0;
+  var titleH = titleLines * size * 1.25, subH = node.sub ? subLines * subSize * 1.25 + 2 : 0;
+  var top = center(node).y - (titleH + subH) / 2;
+  /* one line each: exactly the old spots, so existing sheets do not move */
+  if (titleLines === 1 && subLines <= 1) {
+    var my = center(node).y;
+    return { room: room, subSize: subSize, height: titleH + subH, titleY: node.sub ? my - 3 : my + 4, subY: my + 12 };
+  }
+  return {
+    room: room, subSize: subSize, height: titleH + subH,
+    titleY: top + titleH / 2 + size * 0.35,
+    subY: top + titleH + 2 + (subH - 2) / 2 + subSize * 0.35
+  };
+}
 function drawNodeLabels(node, labelGroup, mid, format) {
-  labelGroup.appendChild(styledText(mid.x, node.sub ? mid.y - 3 : mid.y + 4, node.title, format));
+  var lay = shapeTextLayout(node, format);
+  labelGroup.appendChild(styledText(mid.x, lay.titleY, node.title, Object.assign({}, format, { wrapWidth: lay.room })));
 
   if (node.sub) {
-    labelGroup.appendChild(styledText(mid.x, mid.y + 12, node.sub, {
-      size: Math.max(8, (node.titleSize || 11.5) - 2.5),
-      color: INK_SOFT, italic: node.italic, anchor: "middle"
+    labelGroup.appendChild(styledText(mid.x, lay.subY, node.sub, {
+      size: lay.subSize, color: INK_SOFT, italic: node.italic, anchor: "middle", wrapWidth: lay.room
     }));
   }
+}
+/* A shape grows when its words need more room than it has: boxes, notes
+   and pills grow taller, while diamonds and ellipses, which have little
+   room near their edges, grow both ways about their centre and keep
+   their proportions. A shape never shrinks on its own, so a size someone
+   chose stays put. */
+function fitShapeText(node) {
+  if (!isShape(node) || node.type === "table" || (!node.title && !node.sub)) return;
+  var format = { size: node.titleSize || 11.5, bold: node.bold, italic: node.italic };
+  var extra = node.type === "diamond" ? 2.1 : node.type === "ellipse" ? 1.5 : 1;
+  function need() { return Math.ceil(shapeTextLayout(node, format).height * extra + 18); }
+  if (node.type !== "diamond" && node.type !== "ellipse") {
+    if (node.h < need()) node.h = need();
+    return;
+  }
+  if (node.h >= need()) return;
+  var cx = node.x + node.w / 2, cy = node.y + node.h / 2;
+  for (var guard = 0; guard < 60 && node.h < need(); guard++) { node.w *= 1.05; node.h *= 1.05; }
+  node.w = Math.round(node.w); node.h = Math.round(node.h);
+  node.x = Math.round(cx - node.w / 2); node.y = Math.round(cy - node.h / 2);
 }
 
 function drawEdge(edge) {
@@ -2474,7 +2521,8 @@ function drawFreeText(item) {
   var node = styledText(item.x, item.y, item.text, {
     size: item.size, color: item.color, bold: item.bold, italic: item.italic,
     strike: item.strike, underline: item.underline,
-    weight: item.weight || 400, anchor: item.anchor
+    weight: item.weight || 400, anchor: item.anchor,
+    wrapWidth: item.w > 0 ? item.w : null
   });
   labelGroup.appendChild(node);
 
@@ -2973,6 +3021,15 @@ function drawOverlay() {
     }));
   }
 
+  if (single && single.kind === "text" && single.item.w > 0) {
+    var col = textColumn(single.item), tb = textBounds[single.item.id];
+    var midY = tb ? tb.y + tb.height / 2 : single.item.y;
+    overlay.appendChild(makeEl("line", {
+      x1: col.x.toFixed(1), y1: (midY - 14 * k).toFixed(1), x2: col.x.toFixed(1), y2: (midY + 14 * k).toFixed(1),
+      stroke: RED, "stroke-width": (0.8 * k).toFixed(2), "stroke-dasharray": (3 * k) + " " + (3 * k), opacity: 0.6
+    }));
+    overlay.appendChild(handleRect(col.x + col.w, midY, { textWidth: single.item.id }));
+  }
   if (single && single.kind === "node") {
     var n = single.item;
     [["nw", n.x, n.y], ["ne", n.x + n.w, n.y], ["se", n.x + n.w, n.y + n.h], ["sw", n.x, n.y + n.h]]
@@ -3812,6 +3869,11 @@ stage.addEventListener("pointerdown", function (event) {
     stage.setPointerCapture(event.pointerId);
     return;
   }
+  if (d.textWidth) {
+    drag = { type: "textw", id: d.textWidth, moved: false };
+    stage.setPointerCapture(event.pointerId);
+    return;
+  }
   if (d.laneNode) {
     drag = { type: "lanemove", id: d.laneNode, axis: d.laneAxis, from: +d.laneIndex, to: null, moved: false };
     stage.setPointerCapture(event.pointerId);
@@ -3982,6 +4044,17 @@ window.addEventListener("pointermove", function (event) {
      table keeps its size. */
   /* dragging a row or column tab: the landing spot is the nearest line
      between rows or columns to the pointer */
+  /* dragging a text column's handle sets how wide it is */
+  if (drag.type === "textw") {
+    var tw = findText(drag.id);
+    if (!tw) return;
+    var reach = tw.anchor === "middle" ? 2 * Math.abs(point.x - tw.x) : tw.anchor === "end" ? tw.x - point.x : point.x - tw.x;
+    tw.w = Math.round(clamp(snapOn ? snap(reach) : reach, 60, 2000));
+    drag.moved = true;
+    renderCanvas();
+    return;
+  }
+
   if (drag.type === "lanemove") {
     var lt = findNode(drag.id);
     if (!lt) return;
@@ -4143,6 +4216,7 @@ function endDrag(event) {
   if (d.type === "marquee") { render(); return; }
   if (d.type === "move" && !d.moved) { render(); return; }
   if (d.type === "col" && !d.moved) { render(); return; }
+  if (d.type === "textw") { if (d.moved) commit(); render(); return; }
   if (d.type === "lanemove") {
     var lt2 = findNode(d.id);
     if (lt2 && d.to !== null) {
@@ -4330,18 +4404,29 @@ function layoutEditor() {
       width: codeW + 10, size: cm.size, textAlign: "left", mono: true, lines: cm.lines.length, lineHeight: 1.5
     };
   } else if (found.kind === "node") {
-    var n = found.item, mid = center(n);
+    var n = found.item, mid = center(n), tsize = n.titleSize || 11.5;
+    var lay = shapeTextLayout(n, { size: tsize, bold: n.bold, italic: n.italic }), sub = editing.field === "sub";
+    var esize = sub ? lay.subSize : tsize;
     spot = {
-      x: mid.x, y: editing.field === "sub" ? mid.y + 9 : (n.sub ? mid.y - 3 : mid.y + 4),
-      width: Math.max(n.w - 16, 60),
-      size: editing.field === "sub" ? Math.max(8, (n.titleSize || 11.5) - 2.5) : (n.titleSize || 11.5)
+      x: mid.x, y: (sub ? lay.subY : lay.titleY) - esize * 0.35,
+      width: lay.room + 10, size: esize,
+      lines: richLines(inlineInput.value, { size: esize, bold: !sub && n.bold, wrapWidth: lay.room }).length
     };
   } else if (found.kind === "text") {
     var box = textBounds[editing.id];
     var t = found.item;
-    spot = box
-      ? { x: box.x + box.width / 2, y: box.y + box.height / 2, width: Math.max(box.width, 90), size: t.size }
-      : { x: t.x, y: t.y, width: 120, size: t.size };
+    if (t.w > 0) {
+      var colm = textColumn(t);
+      spot = {
+        x: colm.x + colm.w / 2, y: box ? box.y + box.height / 2 : t.y, width: colm.w + 10, size: t.size,
+        textAlign: t.anchor === "start" ? "left" : t.anchor === "end" ? "right" : "center",
+        lines: richLines(inlineInput.value, { size: t.size, bold: t.bold, wrapWidth: t.w }).length
+      };
+    } else {
+      spot = box
+        ? { x: box.x + box.width / 2, y: box.y + box.height / 2, width: Math.max(box.width, 90), size: t.size }
+        : { x: t.x, y: t.y, width: 120, size: t.size };
+    }
   } else {
     var geo = edgeGeometry(found.item);
     if (!geo) return closeEditor(true);
@@ -4387,6 +4472,7 @@ function applyEditor() {
     fitCode(found.item);   /* the card grows while you type */
   } else if (found.kind === "node") {
     if (editing.field === "sub") found.item.sub = value; else found.item.title = value;
+    fitShapeText(found.item);
   } else if (found.kind === "text") {
     found.item.text = value;
   } else {
@@ -5284,6 +5370,11 @@ function buildEdgeBubble(edge) {
     }));
   }
 }
+/* Where a wrapping text item's column sits, from its anchor point. */
+function textColumn(item) {
+  var w = item.w, x = item.anchor === "middle" ? item.x - w / 2 : item.anchor === "end" ? item.x - w : item.x;
+  return { x: x, w: w };
+}
 function buildTextBubble(item) {
   bubble.appendChild(numberControl(item.size, 6, 96, "Font size",
     function (v) { patchSelected({ size: v }); }, 0.5));
@@ -5300,6 +5391,21 @@ function buildTextBubble(item) {
         onClick: function () { patchSelected({ anchor: a[0] }); }
       }));
     });
+  bubble.appendChild(divider());
+  /* Wrap gives the text a column to flow in; the handle on the right of
+     the selection sets how wide it is. */
+  bubble.appendChild(toolButton({
+    icon: "wrap", label: "Wrap", pressed: item.w > 0,
+    title: item.w > 0 ? "Stop wrapping: lines run as long as they are typed" : "Wrap into a column; drag the handle on the right to set its width",
+    onClick: function () {
+      patchSelected({ w: function (it, kind) {
+        if (kind !== "text") return undefined;
+        if (it.w > 0) return 0;
+        var box = textBounds[it.id];
+        return Math.round(clamp(box ? box.width : 320, 160, 420));
+      } });
+    }
+  }));
 }
 
 /* Several things selected: the same look and font controls as a single
