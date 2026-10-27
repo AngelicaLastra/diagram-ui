@@ -2426,7 +2426,7 @@ function drawEdge(edge) {
 
   if (edge.head !== "none") {
     shapeGroup.appendChild(makeEl("path", {
-      d: "M-5,-4 L0,0 L-5,4",
+      d: arrowheadPath(edge),
       fill: "none", stroke: color, "stroke-width": edge.weight || 1.6,
       "stroke-linecap": "round", "stroke-linejoin": "round",
       transform: "translate(" + geo.tip.x.toFixed(1) + "," + geo.tip.y.toFixed(1) + ") rotate(" + geo.tip.angle.toFixed(1) + ")"
@@ -2435,7 +2435,7 @@ function drawEdge(edge) {
   if (edge.tail === "arrow") {
     var backAngle = angleBetween(geo.handles.length ? { x: geo.handles[0].x, y: geo.handles[0].y } : geo.end, geo.start);
     shapeGroup.appendChild(makeEl("path", {
-      d: "M-5,-4 L0,0 L-5,4",
+      d: arrowheadPath(edge),
       fill: "none", stroke: color, "stroke-width": edge.weight || 1.6,
       "stroke-linecap": "round", "stroke-linejoin": "round",
       transform: "translate(" + geo.start.x.toFixed(1) + "," + geo.start.y.toFixed(1) + ") rotate(" + backAngle.toFixed(1) + ")"
@@ -3547,7 +3547,7 @@ function styleOf(found) {
   } else if (kind === "edge") {
     st.line = it.color; st.textColor = it.labelColor || it.color; st.size = it.labelSize;
     st.weight = it.weight; st.dashed = !!it.dashed; st.head = it.head; st.tail = it.tail; st.onPath = it.onPath;
-    st.flow = !!it.flow; st.flowSpeed = it.flowSpeed; st.flowStyle = it.flowStyle;
+    st.flow = !!it.flow; st.flowSpeed = it.flowSpeed; st.flowStyle = it.flowStyle; st.headLen = +it.headLen || 5;
   } else if (kind === "text") {
     st.line = it.color; st.textColor = it.color; st.size = it.size; st.anchor = it.anchor;
   } else if (kind === "code") {
@@ -3573,7 +3573,7 @@ function applyStyle(found, st) {
     if (kind === "table" && st.kind === "table") set("header", st.header);
   } else if (kind === "edge") {
     set("color", st.line); set("labelColor", st.textColor);
-    if (same) { set("labelSize", st.size); set("weight", st.weight); set("dashed", st.dashed); set("head", st.head); set("tail", st.tail); set("onPath", st.onPath); set("flow", st.flow); set("flowSpeed", st.flowSpeed); set("flowStyle", st.flowStyle); }
+    if (same) { set("labelSize", st.size); set("weight", st.weight); set("dashed", st.dashed); set("head", st.head); set("tail", st.tail); set("onPath", st.onPath); set("flow", st.flow); set("flowSpeed", st.flowSpeed); set("flowStyle", st.flowStyle); set("headLen", st.headLen); }
   } else if (kind === "text") {
     set("color", st.textColor || st.line);
     if (same) { set("size", st.size); set("anchor", st.anchor); }
@@ -5137,6 +5137,17 @@ function buildCellTextLook(cur) {
     onClick: function () { activeCell = null; afterSelect(); }
   }));
 }
+/* The open arrowhead's length in px (5 by default); it spreads in
+   proportion and keeps the line's own thickness. */
+function arrowheadPath(edge) {
+  var len = clamp(+edge.headLen || 5, 2, 30), half = Math.round(len * 8) / 10;
+  return "M" + (-len) + "," + (-half) + " L0,0 L" + (-len) + "," + half;
+}
+function headSizeControl(list) {
+  bubble.appendChild(numberControl(+list[0].headLen || 5, 2, 30, "Arrowhead size", function (v) {
+    patchSelected({ headLen: function (it, kind) { return kind === "edge" ? v : undefined; } });
+  }, 1));
+}
 function flowControls(list) {
   var on = list.length > 0 && list.every(function (e) { return e.flow; });
   bubble.appendChild(toolButton({
@@ -5207,6 +5218,7 @@ function buildEdgeBubble(edge) {
       patchSelected(patch);
     }));
   });
+  headSizeControl([edge]);
   flowControls([edge]);
   bubble.appendChild(toolButton({
     label: "Flip", title: "Turn the arrow around",
@@ -5299,7 +5311,7 @@ function buildMultiBubble() {
     }));
   }
   var arrows = selList().filter(function (f) { return f.kind === "edge"; }).map(function (f) { return f.item; });
-  if (arrows.length) { bubble.appendChild(divider()); flowControls(arrows); }
+  if (arrows.length) { bubble.appendChild(divider()); headSizeControl(arrows); flowControls(arrows); }
   var worded = selList().filter(function (f) {
     return f.kind === "text" || f.kind === "edge" || (f.kind === "node" && isShape(f.item));
   }).map(function (f) { return f.item; });
