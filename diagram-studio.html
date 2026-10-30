@@ -644,6 +644,8 @@ var ICONS = {
   move: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2.5 V15.5 M2.5 9 H15.5"/><path d="M7 4.5 L9 2.5 L11 4.5 M7 13.5 L9 15.5 L11 13.5 M4.5 7 L2.5 9 L4.5 11 M13.5 7 L15.5 9 L13.5 11"/></g>',
   left: '<path d="M11 5 L7 9 L11 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
   right: '<path d="M7 5 L11 9 L7 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  group: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2.5" y="2.5" width="13" height="13" rx="2" stroke-dasharray="2.2 1.8"/><rect x="5" y="5" width="5" height="4.5" rx="1"/><rect x="8.5" y="9" width="4.5" height="4" rx="1"/></g>',
+  ungroup: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2.5" y="3" width="6" height="5.5" rx="1"/><rect x="9.5" y="9.5" width="6" height="5.5" rx="1"/><path d="M11 3.5 L15 3.5 L15 7 M3 11 L3 15 L7 15" stroke-dasharray="1.8 1.6"/></g>',
   vTop: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 3.5 H15"/><path d="M6 7 H12 M6 10 H12"/></g>',
   vMid: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 9 H4.5 M13.5 9 H15" opacity=".5"/><path d="M6 7.5 H12 M6 10.5 H12"/></g>',
   vBot: '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"><path d="M3 14.5 H15"/><path d="M6 8 H12 M6 11 H12"/></g>',
@@ -3081,6 +3083,21 @@ function drawOverlay() {
 
   if (drag && drag.type !== "connect") return;
 
+  pickedGroups().forEach(function (members) {
+    var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    members.forEach(function (f) {
+      var b = boxOf(f);
+      if (f.kind === "edge") { var eg = edgeGeometry(f.item); if (eg) b = { x: Math.min(eg.start.x, eg.end.x), y: Math.min(eg.start.y, eg.end.y), w: Math.abs(eg.end.x - eg.start.x), h: Math.abs(eg.end.y - eg.start.y) }; }
+      if (!b) return;
+      x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+    });
+    if (x0 === Infinity) return;
+    overlay.appendChild(makeEl("rect", {
+      x: (x0 - 12 * k).toFixed(1), y: (y0 - 12 * k).toFixed(1), width: (x1 - x0 + 24 * k).toFixed(1), height: (y1 - y0 + 24 * k).toFixed(1),
+      fill: "none", stroke: RED, "stroke-width": (1.2 * k).toFixed(2), "stroke-dasharray": (8 * k) + " " + (5 * k), rx: 10 * k
+    }));
+  });
+
   var single = chosenList.length === 1 ? chosenList[0] : null;
 
   var cur = currentCell();
@@ -3110,7 +3127,7 @@ function drawOverlay() {
       .forEach(function (c) {
         overlay.appendChild(handleRect(c[1], c[2], { resizeCorner: c[0], resizeNode: n.id }));
       });
-  } else if (chosenList.length > 1) {
+  } else if (chosenList.length > 1 && !selIsOneGroup()) {
     var b = selectionBox();
     if (b) {
       overlay.appendChild(makeEl("rect", {
@@ -3209,8 +3226,51 @@ function render() {
 /* ================================================================
    12. Selection helpers
    ================================================================ */
-function selectOnly(id) { sel.clear(); if (id) sel.add(id); afterSelect(); }
-function selectToggle(id) { if (sel.has(id)) sel.delete(id); else sel.add(id); afterSelect(); }
+/* Grouped things carry the same `group` id and are picked together.
+   Double clicking one still types into just that one. */
+function withGroup(id) {
+  var f = findAny(id), g = f && f.item.group;
+  if (!g) return [id];
+  return nodes().concat(edges(), texts()).filter(function (it) { return it.group === g; }).map(function (it) { return it.id; });
+}
+function selectOnly(id) { sel.clear(); if (id) withGroup(id).forEach(function (k) { sel.add(k); }); afterSelect(); }
+function selectToggle(id) {
+  var on = !sel.has(id);
+  withGroup(id).forEach(function (k) { if (on) sel.add(k); else sel.delete(k); });
+  afterSelect();
+}
+/* The groups whose every member is picked, as lists of items. */
+function pickedGroups() {
+  var seen = {}, out = [];
+  selList().forEach(function (f) {
+    var g = f.item.group;
+    if (!g || seen[g]) return;
+    seen[g] = true;
+    var members = withGroup(f.item.id);
+    if (members.every(function (k) { return sel.has(k); })) out.push(members.map(findAny).filter(Boolean));
+  });
+  return out;
+}
+/* One group, and nothing else, is picked. */
+function selIsOneGroup() {
+  var g = pickedGroups();
+  return g.length === 1 && g[0].length === sel.size;
+}
+function groupSelected() {
+  var list = selList();
+  if (list.length < 2) { toast("Pick two or more things to group"); return; }
+  var g = uid("g");
+  list.forEach(function (f) { f.item.group = g; });
+  commit(); render();
+  toast("Grouped " + list.length + " items  (" + MOD + "+Shift+G ungroups)");
+}
+function ungroupSelected() {
+  var any = false;
+  selList().forEach(function (f) { if (f.item.group) { delete f.item.group; any = true; } });
+  if (!any) { toast("Nothing grouped here"); return; }
+  commit(); render();
+  toast("Ungrouped");
+}
 function clearSel() { sel.clear(); afterSelect(); }
 function selectAll() {
   sel = new Set(nodes().map(function (n) { return n.id; })
@@ -3602,25 +3662,35 @@ function deleteSelected() {
   closeEditor(true);
   commit(); render();
 }
+/* Copies of grouped things are grouped among themselves, not with the
+   originals. Returns a function that gives a copy its new group id. */
+function regrouper() {
+  var made = {};
+  return function (copy) {
+    if (copy.group) copy.group = made[copy.group] || (made[copy.group] = uid("g"));
+    return copy;
+  };
+}
 function duplicateSelected() {
   var found = selList();
   if (!found.length) return;
-  var map = {}, fresh = [];
+  var map = {}, fresh = [], regroup = regrouper();
 
   found.filter(function (f) { return f.kind === "node"; }).forEach(function (f) {
-    var copy = deepCopy(f.item);
+    var copy = regroup(deepCopy(f.item));
     copy.id = uid("n"); copy.x += 24; copy.y += 24;
     map[f.item.id] = copy.id;
     nodes().push(copy); fresh.push(copy.id);
   });
   found.filter(function (f) { return f.kind === "text"; }).forEach(function (f) {
-    var copy = deepCopy(f.item);
+    var copy = regroup(deepCopy(f.item));
     copy.id = uid("t"); copy.x += 24; copy.y += 24;
     texts().push(copy); fresh.push(copy.id);
   });
   found.filter(function (f) { return f.kind === "edge"; }).forEach(function (f) {
     var copy = copyEdge(f.item, map, 24);
     if (!copy) return;
+    regroup(copy);
     edges().push(copy); fresh.push(copy.id);
   });
 
@@ -3644,18 +3714,19 @@ function copySelected() {
 }
 function pasteClipboard() {
   if (!clipboard) return;
-  var map = {}, fresh = [];
+  var map = {}, fresh = [], regroup = regrouper();
   clipboard.nodes.forEach(function (n) {
-    var copy = deepCopy(n); copy.id = uid("n"); copy.x += 26; copy.y += 26;
+    var copy = regroup(deepCopy(n)); copy.id = uid("n"); copy.x += 26; copy.y += 26;
     map[n.id] = copy.id; nodes().push(copy); fresh.push(copy.id);
   });
   clipboard.texts.forEach(function (t) {
-    var copy = deepCopy(t); copy.id = uid("t"); copy.x += 26; copy.y += 26;
+    var copy = regroup(deepCopy(t)); copy.id = uid("t"); copy.x += 26; copy.y += 26;
     texts().push(copy); fresh.push(copy.id);
   });
   clipboard.edges.forEach(function (e) {
     var copy = copyEdge(e, map, 26);
     if (!copy) return;
+    regroup(copy);
     edges().push(copy); fresh.push(copy.id);
   });
   sel = new Set(fresh);
@@ -4331,6 +4402,7 @@ window.addEventListener("pointermove", function (event) {
     edges().forEach(function (e) {
       if (endIn(e.from, e.p1) && endIn(e.to, e.p2)) hits.push(e.id);
     });
+    hits = [].concat.apply([], hits.map(withGroup));
     sel = drag.add ? new Set(Array.from(drag.base).concat(hits)) : new Set(hits);
     drawOverlay(); renderBubble();
     return;
@@ -5629,7 +5701,11 @@ function buildTextBubble(item) {
    shape, applied to everything they fit, with alignment folded into one
    menu so the bar stays a sensible length. */
 function buildMultiBubble() {
-  bubble.appendChild(htmlEl("span", null, sel.size + " selected"));
+  var oneGroup = selIsOneGroup();
+  bubble.appendChild(htmlEl("span", null, oneGroup ? "Group of " + sel.size : sel.size + " selected"));
+  bubble.appendChild(toolButton(oneGroup
+    ? { icon: "ungroup", label: "Ungroup", title: "Ungroup  (" + MOD + "+Shift+G)", onClick: ungroupSelected }
+    : { icon: "group", label: "Group", title: "Group these so they pick and move as one  (" + MOD + "+G)", onClick: groupSelected }));
   bubble.appendChild(divider());
   var align = toolButton({
     icon: "alnL", label: "Align", title: "Line up or spread out the selection",
@@ -6012,8 +6088,15 @@ function editMenu() {
     { label: "Delete", icon: "trash", key: "Del", danger: true, disabled: !sel.size, run: deleteSelected }
   ];
 }
-function arrangeMenu() {
+function groupItems() {
+  var grouped = selList().some(function (f) { return f.item.group; });
   return [
+    { label: "Group", icon: "group", key: MOD + "+G", disabled: sel.size < 2 || selIsOneGroup(), run: groupSelected },
+    { label: "Ungroup", icon: "ungroup", key: MOD + "+Shift+G", disabled: !grouped, run: ungroupSelected }
+  ];
+}
+function arrangeMenu() {
+  return groupItems().concat(["-",
     { label: "Bring to front", icon: "front", run: function () { reorder("front"); } },
     { label: "Send to back", icon: "back", run: function () { reorder("back"); } },
     "-",
@@ -6028,7 +6111,7 @@ function arrangeMenu() {
     { label: "Spread down", icon: "distV", run: function () { distributeSelected("v"); } },
     "-",
     { label: "Smart guides", checked: guidesOn, run: function () { guidesOn = !guidesOn; persistNow(); } }
-  ];
+  ]);
 }
 function openContextMenu(x, y) {
   var has = sel.size > 0;
@@ -6041,10 +6124,10 @@ function openContextMenu(x, y) {
       { label: "Copy", run: copySelected },
       { label: "Copy style", icon: "brush", key: MOD + "+Alt+C", run: function () { copyStyle(false); } },
       { label: "Paste style", key: MOD + "+Alt+V", disabled: !paintStyle, run: pasteStyle },
-      "-",
+      "-"].concat(groupItems(), ["-",
       { label: "Bring to front", icon: "front", run: function () { reorder("front"); } },
       { label: "Send to back", icon: "back", run: function () { reorder("back"); } }
-    ];
+    ]);
     var only = selList();
     if (only.length === 1) {
       defs.push("-", { label: "Hide it during Play", icon: "eyeOff", run: function () { addHide(only[0].item.id, true); } });
@@ -7438,7 +7521,7 @@ function showShortcuts() {
      ["Double click", "Type on a shape, arrow or label"], ["Enter", "Edit whatever is selected"],
      ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
      [MOD + " + Z", "Undo"], [MOD + " + Shift + Z", "Redo"],
-     [MOD + " + C  V  X", "Copy, paste, cut (table cells, when cells are picked)"], [MOD + " + D", "Duplicate"],
+     [MOD + " + C  V  X", "Copy, paste, cut (table cells, when cells are picked)"], [MOD + " + D", "Duplicate"], [MOD + " + G", "Group the selection"], [MOD + " + Shift + G", "Ungroup"],
      [MOD + " + Alt + C  V", "Copy a style, paste it onto the selection"],
      [MOD + " + B  I  U  E", "While typing: bold, italic, underline or code for the selected words"],
      [MOD + " + A", "Select everything"], ["Delete", "Remove the selection"],
@@ -7542,6 +7625,7 @@ document.addEventListener("keydown", function (event) {
     if (k === "x") { event.preventDefault(); if (currentCell()) copyCells(true); else { copySelected(); deleteSelected(); } return; }
     if (k === "v") return;   /* handled by the paste event, which can see pictures */
     if (k === "d") { event.preventDefault(); duplicateSelected(); return; }
+    if (k === "g") { event.preventDefault(); if (event.shiftKey) ungroupSelected(); else groupSelected(); return; }
     if (k === "a") { event.preventDefault(); selectAll(); return; }
     if (k === "s") { event.preventDefault(); saveJson(); return; }
     if (k === "o") { event.preventDefault(); $("fileInput").click(); return; }
