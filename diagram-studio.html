@@ -2742,13 +2742,19 @@ function renderCanvas() {
 
   /* A shape's words sit right on top of its own body, so bringing a
      picture forward covers the text of whatever is behind it. Arrow
-     labels and free text stay on the top layer above every shape. */
-  var bottom = [], top = [];
-  edges().forEach(function (e) { bottom.push(keyCache.shapes.get(e.id)); top.push(keyCache.labels.get(e.id)); });
-  nodes().forEach(function (n) { bottom.push(keyCache.shapes.get(n.id), keyCache.labels.get(n.id)); });
-  texts().forEach(function (t) { top.push(keyCache.labels.get(t.id)); });
+     labels and free text sit on the top layer above every shape, except
+     for anything sent to the back (drawn under it all) or brought to the
+     front (drawn over it all), which keeps its words with it. */
+  var bottom = [], top = [], st = stackOrder(), hitOrder = [];
+  function whole(id) { return [keyCache.shapes.get(id), keyCache.labels.get(id)]; }
+  st.back.forEach(function (it) { bottom.push.apply(bottom, whole(it.id)); hitOrder.push(it.id); });
+  st.middle.forEach(function (it) { if (it.from !== undefined) { bottom.push(keyCache.shapes.get(it.id)); top.push(keyCache.labels.get(it.id)); hitOrder.push(it.id); } });
+  st.middle.forEach(function (it) { if (it.from === undefined && it.text === undefined) { bottom.push.apply(bottom, whole(it.id)); hitOrder.push(it.id); } });
+  st.middle.forEach(function (it) { if (it.text !== undefined && it.anchor !== undefined) { top.push(keyCache.labels.get(it.id)); hitOrder.push(it.id); } });
+  st.front.forEach(function (it) { top.push.apply(top, whole(it.id)); hitOrder.push(it.id); });
   syncChildren(shapesLayer, bottom);
   syncChildren(labelsLayer, top);
+  order = hitOrder;
   texts().forEach(measureText);
   pruneCache(keyCache.shapes, order);
   pruneCache(keyCache.labels, order);
@@ -3732,13 +3738,40 @@ function pasteClipboard() {
   sel = new Set(fresh);
   commit(); render();
 }
+/* Stacking: everything starts in the usual layers (arrows, then shapes,
+   then text and arrow labels on top). `z` takes an item out of them: below
+   zero it is drawn under everything, above zero over everything, in
+   order of z and then of how it was drawn before. */
+function zOf(it) { return +it.z || 0; }
+function stackOrder() {
+  var all = edges().concat(nodes(), texts());
+  function byZ(a, b) { return zOf(a) - zOf(b) || all.indexOf(a) - all.indexOf(b); }
+  return {
+    back: all.filter(function (it) { return zOf(it) < 0; }).sort(byZ),
+    middle: all.filter(function (it) { return !zOf(it); }),
+    front: all.filter(function (it) { return zOf(it) > 0; }).sort(byZ)
+  };
+}
+/* Bring to front puts the picked things over everything else, and send
+   to back under everything, arrows and text included. Picked things keep
+   their order among themselves. */
 function reorder(mode) {
-  var list = nodes();
-  var chosen = list.filter(function (n) { return sel.has(n.id); });
+  if (!sel.size) return;
+  var st = stackOrder(), drawn = st.back.concat(
+    st.middle.filter(function (it) { return it.from !== undefined; }),
+    st.middle.filter(function (it) { return it.from === undefined && it.text === undefined; }),
+    st.middle.filter(function (it) { return it.text !== undefined && it.anchor !== undefined; }),
+    st.front);
+  var chosen = drawn.filter(function (it) { return sel.has(it.id); });
+  var others = drawn.filter(function (it) { return !sel.has(it.id); }).map(zOf);
   if (!chosen.length) return;
-  var rest = list.filter(function (n) { return !sel.has(n.id); });
-  if (mode === "front") page().nodes = rest.concat(chosen);
-  else page().nodes = chosen.concat(rest);
+  if (mode === "front") {
+    var hi = Math.max.apply(null, [0].concat(others));
+    chosen.forEach(function (it, i) { it.z = hi + 1 + i; });
+  } else {
+    var lo = Math.min.apply(null, [0].concat(others));
+    chosen.forEach(function (it, i) { it.z = lo - chosen.length + i; });
+  }
   commit(); render();
 }
 function alignSelected(mode) {
