@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<!-- Built from src/ by build.js. Edit the files there, then run: node build.js -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diagram studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* @include styles.css */
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <span class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <path d="M2.4 11.6 C4 5.2 9.4 3.2 13.6 4.6"/>
+          <path d="M10.8 3.4 L13.9 4.6 L12.7 7.8"/>
+        </svg>
+      </span>
+      <span class="name">Diagram studio</span>
+    </span>
+
+    <input class="doc-title" id="docTitle" value="Untitled sketch" aria-label="Document name" spellcheck="false">
+
+    <span class="group">
+      <button type="button" class="btn icon" id="btnUndo" data-tip="Undo" aria-label="Undo"></button>
+      <button type="button" class="btn icon" id="btnRedo" data-tip="Redo" aria-label="Redo"></button>
+    </span>
+
+    <span class="group">
+      <button type="button" class="btn" id="btnFile">File</button>
+      <button type="button" class="btn" id="btnEdit">Edit</button>
+      <button type="button" class="btn" id="btnArrange">Arrange</button>
+    </span>
+
+    <span class="grow"></span>
+
+    <span class="group">
+      <button type="button" class="btn icon" id="btnZoomOut" data-tip="Zoom out" aria-label="Zoom out"></button>
+      <span id="zoomLabel" class="zoom-label">100%</span>
+      <button type="button" class="btn icon" id="btnZoomIn" data-tip="Zoom in" aria-label="Zoom in"></button>
+      <button type="button" class="btn" id="btnFit" data-tip="Fit everything you have drawn">Fit</button>
+    </span>
+
+    <span class="group">
+      <select class="sel" id="rough" aria-label="How rough the shapes look">
+        <option value="clean">Clean edges</option>
+        <option value="light">Lightly drawn</option>
+        <option value="medium" selected>Hand drawn</option>
+        <option value="heavy">Very loose</option>
+      </select>
+      <button type="button" class="btn" id="btnTexture" aria-pressed="true" data-tip="Paper grain and wobble">Texture</button>
+      <button type="button" class="btn" id="btnSnap" aria-pressed="true" data-tip="Snap to the grid">Snap</button>
+      <button type="button" class="btn" id="btnGrid" aria-pressed="true" data-tip="Show the grid">Grid</button>
+    </span>
+
+    <span class="group">
+      <button type="button" class="btn accent" id="btnPlay" data-tip="Reveal the diagram piece by piece">
+        <span id="playIcon"></span><span id="playLabel">Play</span>
+      </button>
+      <select class="sel" id="speed" aria-label="Reveal speed">
+        <option value="1100">Slow</option>
+        <option value="700" selected>Normal</option>
+        <option value="420">Fast</option>
+      </select>
+    </span>
+  </header>
+
+  <div class="body">
+    <nav class="rail" id="rail" aria-label="Tools"></nav>
+
+    <aside class="drawer" id="drawer" aria-label="Shapes and tones">
+      <div class="drawer-head">Shapes</div>
+      <div class="drawer-body">
+        <div class="stencil" id="stencil"></div>
+        <div class="drawer-head" style="padding-left:4px">Tones</div>
+        <div class="tone-row" id="tones"></div>
+        <p class="drawer-note" id="drawerNote">Drag a shape onto the sheet, or click one and then click where it goes.</p>
+      </div>
+    </aside>
+
+    <div class="stagewrap" id="stagewrap">
+      <div class="sheet" id="sheet">
+        <svg id="stage" viewBox="0 0 900 660" xmlns="http://www.w3.org/2000/svg">
+          <defs id="defs">
+            <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+              <path d="M30 0 L0 0 L0 30" fill="none" stroke="#F0EDE5" stroke-width="1"/>
+            </pattern>
+          </defs>
+          <rect id="bg" x="0" y="0" width="900" height="660" fill="#FFFFFF"/>
+          <rect id="gridRect" x="0" y="0" width="900" height="660" fill="url(#grid)"/>
+          <g id="shapes" font-family="Poppins, system-ui, sans-serif"></g>
+          <g id="flows"></g>
+          <g id="labels" font-family="Poppins, system-ui, sans-serif"></g>
+          <g id="hits"></g>
+          <g id="overlay"></g>
+        </svg>
+
+        <div class="floating" id="bubble" hidden></div>
+        <textarea id="inlineEdit" class="inline-edit" hidden spellcheck="false" aria-label="Edit label" rows="1"></textarea>
+        <div class="fmt-strip" id="fmtStrip" role="toolbar" aria-label="Format the selected words" hidden></div>
+      </div>
+    </div>
+
+    <aside class="drawer order-panel" id="orderPanel" aria-label="Reveal order" hidden>
+      <div class="order-head">
+        <span class="drawer-head">Reveal order</span>
+        <span class="grow"></span>
+        <button type="button" class="btn" id="orderReset" data-tip="Go back to the automatic order, which follows the arrows">Reset</button>
+      </div>
+      <div class="drawer-body" id="orderBody"></div>
+    </aside>
+  </div>
+
+  <footer class="statusbar">
+    <span class="pages" id="pages"></span>
+    <button type="button" class="btn icon" id="addPage" data-tip="Add a sheet" aria-label="Add a sheet"></button>
+    <span class="divider"></span>
+    <span class="hint" id="hint">Double click a shape to type. Drag from an edge dot to draw an arrow.</span>
+    <span class="saved" id="saved"></span>
+  </footer>
+
+</div>
+
+<div class="menu" id="menu" hidden></div>
+<div class="palette" id="palette" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<input type="file" id="fileInput" accept="application/json,.json" hidden>
+<div class="scrim" id="scrim" hidden><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
+<script>
+"use strict";
+(function () {
+
+/* @include js */
+})();
+</script>
+</body>
+</html>

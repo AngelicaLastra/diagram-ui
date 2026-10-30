@@ -71,7 +71,21 @@ Browsers keep local storage separate for each address, so the hosted version and
 
 ## How it's built
 
-The whole app is plain HTML, CSS and JavaScript in [`diagram-studio.html`](diagram-studio.html), with no dependencies beyond the Poppins font from Google Fonts.
+The app is plain HTML, CSS and JavaScript with no dependencies beyond the Poppins font from Google Fonts. The source is split up in [`src/`](src) so it's easier to find your way around, and [`build.js`](build.js) stitches it back into the single [`diagram-studio.html`](diagram-studio.html) that people open:
+
+```
+src/
+  shell.html        <-- the page markup, with markers for the two parts below
+  styles.css
+  js/
+    01-constants.js
+    02-document.js  <-- the diagram model, undo and saving
+    ...
+    18-app.js       <-- modals, top bar, keyboard, startup
+build.js            <-- node build.js (or --check to spot a stale build)
+```
+
+The JavaScript files are laid end to end inside one function, in name order, so they share one scope and need no imports. The built file is committed, which keeps double-clicking it and the hosted copy working with no build step.
 
 ## Licence
 
