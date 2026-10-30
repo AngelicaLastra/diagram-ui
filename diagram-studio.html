@@ -617,6 +617,7 @@ var SHAPE_KINDS = [
   { type: "ellipse", style: "wash",   label: "Ellipse" },
   { type: "pill",    style: "wash",   label: "Pill" },
   { type: "note",    style: "wash",   label: "Note" },
+  { type: "database", style: "wash",  label: "Database" },
   { type: "table",   style: "wash",   label: "Table" },
   { type: "code",    style: "wash",   label: "Code" }
 ];
@@ -631,6 +632,8 @@ var ICONS = {
   ellipse: '<ellipse cx="9" cy="9" rx="6.4" ry="4.6" fill="none" stroke="currentColor" stroke-width="1.5"/>',
   pill: '<rect x="2.2" y="5.4" width="13.6" height="7.2" rx="3.6" fill="none" stroke="currentColor" stroke-width="1.5"/>',
   note: '<path d="M3.4 3.6 h9.2 l3 3 v7.8 h-12.2 z M12.6 3.6 v3 h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>',
+  database: '<g fill="none" stroke="currentColor" stroke-width="1.4"><ellipse cx="9" cy="4.6" rx="5.6" ry="2.1"/><path d="M3.4 4.6 V13.4 C3.4 14.6 5.9 15.5 9 15.5 C12.1 15.5 14.6 14.6 14.6 13.4 V4.6"/></g>',
+  line: '<path d="M3 14.5 L15 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   table: '<g fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="13" height="11" rx="1.5"/><path d="M2.5 7.2 H15.5 M2.5 10.9 H15.5 M7 3.5 V14.5 M11.2 3.5 V14.5" stroke-width="1.1"/></g>',
   merge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M5.5 9 H12.5 M10.5 7 L12.5 9 L10.5 11 M7.5 7 L5.5 9 L7.5 11"/></g>',
   unmerge: '<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="M9 4 V14" stroke-dasharray="1.6 1.8"/><path d="M7 9 H4.5 M5.8 7.6 L4.4 9 L5.8 10.4 M11 9 H13.5 M12.2 7.6 L13.6 9 L12.2 10.4"/></g>',
@@ -1281,6 +1284,14 @@ function cornersFor(node) {
     for (i = 0; i <= 5; i++) { a = Math.PI / 2 + (i * Math.PI) / 5; pts.push({ x: cl.x + Math.cos(a) * r, y: cl.y + Math.sin(a) * r }); }
     return pts;
   }
+  if (node.type === "database") {
+    /* a cylinder seen from a little above: the back of the lid, down the
+       right side, round the front of the base and up the left side */
+    var ry = dbRim(node), rx = node.w / 2;
+    for (i = 0; i <= 8; i++) { a = Math.PI + (i * Math.PI) / 8; pts.push({ x: mid.x + Math.cos(a) * rx, y: node.y + ry + Math.sin(a) * ry }); }
+    for (i = 0; i <= 8; i++) { a = (i * Math.PI) / 8; pts.push({ x: mid.x + Math.cos(a) * rx, y: node.y + node.h - ry + Math.sin(a) * ry }); }
+    return pts;
+  }
   if (node.type === "note") {
     var f = Math.min(node.w * 0.22, node.h * 0.3, 22);
     return [
@@ -1300,7 +1311,15 @@ function cornersFor(node) {
 }
 /* Shapes sampled into many points look wrong with one overshoot stroke
    per segment, so those get a traced outline instead. */
-function isCurvy(node) { return node.type === "ellipse" || node.type === "pill"; }
+function isCurvy(node) { return node.type === "ellipse" || node.type === "pill" || node.type === "database"; }
+/* How deep a database's lid and base curve. */
+function dbRim(node) { return Math.max(4, Math.min(node.h * 0.14, node.w * 0.16, 14)); }
+/* The front edge of a database's lid, the line that makes it a cylinder. */
+function dbLidPoints(node) {
+  var ry = dbRim(node), rx = node.w / 2, cx = node.x + rx, pts = [];
+  for (var i = 0; i <= 8; i++) { var a = Math.PI - (i * Math.PI) / 8; pts.push({ x: cx + Math.cos(a) * rx, y: node.y + ry + Math.sin(a) * ry }); }
+  return pts;
+}
 
 /* Tables split their box into equal rows and columns. A cell is edited
    through the field name "cell:row:col". */
@@ -1596,20 +1615,37 @@ function roundedPolyline(points, radius) {
 }
 function angleBetween(from, to) { return Math.atan2(to.y - from.y, to.x - from.x) * 180 / Math.PI; }
 
+/* An arrow end is tied to a shape (from, to) or loose on the sheet at a
+   point (p1, p2). A loose end acts as a shape of no size, so the routing
+   below works the same; it faces the other end rather than a side. */
+function pointBox(p) { return { x: p.x, y: p.y, w: 0, h: 0 }; }
+function edgeEnds(edge) {
+  var from = edge.from ? findNode(edge.from) : null, to = edge.to ? findNode(edge.to) : null;
+  if (edge.from ? !from : !edge.p1) return null;
+  if (edge.to ? !to : !edge.p2) return null;
+  return { from: from || pointBox(edge.p1), to: to || pointBox(edge.p2), fromFree: !from, toFree: !to };
+}
+function toward(a, b) {
+  var dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+  return { x: dx / len, y: dy / len };
+}
+function isLooseEdge(edge) { return !edge.from || !edge.to; }
 function edgeGeometry(edge) {
-  var from = findNode(edge.from), to = findNode(edge.to);
-  if (!from || !to) return null;
+  var ends = edgeEnds(edge);
+  if (!ends) return null;
+  var from = ends.from, to = ends.to;
 
   var auto = autoSides(from, to);
   var fromRow = edgeRow(from, edge.fromRow), toRow = edgeRow(to, edge.toRow);
   /* an end tied to a row leaves from the left or right, whichever faces
      the other shape, when its side is left on auto */
   var leftOf = center(to).x >= center(from).x;
-  var fromSide = (!edge.fromSide || edge.fromSide === "auto") ? (fromRow != null ? (leftOf ? "right" : "left") : auto[0]) : edge.fromSide;
-  var toSide = (!edge.toSide || edge.toSide === "auto") ? (toRow != null ? (leftOf ? "left" : "right") : auto[1]) : edge.toSide;
+  var fromSide = (ends.fromFree || !edge.fromSide || edge.fromSide === "auto") ? (fromRow != null ? (leftOf ? "right" : "left") : auto[0]) : edge.fromSide;
+  var toSide = (ends.toFree || !edge.toSide || edge.toSide === "auto") ? (toRow != null ? (leftOf ? "left" : "right") : auto[1]) : edge.toSide;
 
   var start = anchorPoint(from, fromSide, fromRow), end = anchorPoint(to, toSide, toRow);
-  var dirStart = outward(fromSide), dirEnd = outward(toSide);
+  var dirStart = ends.fromFree ? toward(start, end) : outward(fromSide);
+  var dirEnd = ends.toFree ? toward(end, start) : outward(toSide);
   var span = Math.sqrt(Math.pow(end.x - start.x, 2) + Math.pow(end.y - start.y, 2));
 
   if (edge.shape === "straight") {
@@ -2292,6 +2328,13 @@ function drawNode(node) {
     }));
   }
 
+  if (node.type === "database") {
+    shapeGroup.appendChild(makeEl("path", {
+      d: smoothPath(jitterPoints(dbLidPoints(node), jitter * 0.45, random)),
+      fill: "none", stroke: node.accent, "stroke-width": (node.style === "sketch" ? 2.2 : 1.8) * borderScale(node),
+      "stroke-opacity": 0.85, "stroke-linecap": "round", "stroke-dasharray": borderDash(node)
+    }));
+  }
   if (node.type === "note") {
     var f = Math.min(node.w * 0.22, node.h * 0.3, 22);
     shapeGroup.appendChild(makeEl("path", {
@@ -2411,7 +2454,7 @@ function shapeTextLayout(node, format) {
   var titleLines = node.title ? richLines(node.title, Object.assign({}, format, { wrapWidth: room })).length : 1;
   var subLines = node.sub ? richLines(node.sub, { size: subSize, italic: node.italic, wrapWidth: room }).length : 0;
   var titleH = titleLines * size * 1.25, subH = node.sub ? subLines * subSize * 1.25 + 2 : 0;
-  var top = center(node).y - (titleH + subH) / 2;
+  var top = center(node).y - (titleH + subH) / 2 + (node.type === "database" ? dbRim(node) * 0.6 : 0);
   /* one line each: exactly the old spots, so existing sheets do not move */
   if (titleLines === 1 && subLines <= 1) {
     var my = center(node).y;
@@ -2442,7 +2485,7 @@ function fitShapeText(node) {
   if (!isShape(node) || node.type === "table" || (!node.title && !node.sub)) return;
   var format = { size: node.titleSize || 11.5, bold: node.bold, italic: node.italic };
   var extra = node.type === "diamond" ? 2.1 : node.type === "ellipse" ? 1.5 : 1;
-  function need() { return Math.ceil(shapeTextLayout(node, format).height * extra + 18); }
+  function need() { return Math.ceil(shapeTextLayout(node, format).height * extra + 18 + (node.type === "database" ? dbRim(node) * 2 : 0)); }
   if (node.type !== "diamond" && node.type !== "ellipse") {
     if (node.h < need()) node.h = need();
     return;
@@ -2470,6 +2513,14 @@ function drawEdge(edge) {
   if (edge.dashed) line["stroke-dasharray"] = "6 5";
   line["data-line"] = "1";
   shapeGroup.appendChild(makeEl("path", line));
+  /* The paper filter sizes itself to the group's box, and a level or
+     upright line with no head has no height or width, so it would vanish.
+     An unseen frame a few px round the ends gives it room. */
+  shapeGroup.appendChild(makeEl("rect", {
+    x: (Math.min(geo.start.x, geo.end.x) - 4).toFixed(1), y: (Math.min(geo.start.y, geo.end.y) - 4).toFixed(1),
+    width: (Math.abs(geo.end.x - geo.start.x) + 8).toFixed(1), height: (Math.abs(geo.end.y - geo.start.y) + 8).toFixed(1),
+    fill: "none", stroke: "none", "pointer-events": "none"
+  }));
 
   if (edge.head !== "none") {
     shapeGroup.appendChild(makeEl("path", {
@@ -2950,9 +3001,9 @@ function drawOverlay() {
 
   /* anchor dots: on the hovered shape, or on everything while connecting */
   var anchorNodes = [];
-  if (tool === "connect") anchorNodes = nodes();
+  if (isLineTool()) anchorNodes = nodes();
   else if (hoverNode && !drag && tool !== "pen") { var hv = findNode(hoverNode); if (hv) anchorNodes = [hv]; }
-  else if (drag && drag.type === "connect") { anchorNodes = nodes(); }
+  else if (drag && (drag.type === "connect" || drag.type === "reend")) { anchorNodes = nodes(); }
 
   anchorNodes.forEach(function (node) {
     var spots = [];
@@ -2966,7 +3017,7 @@ function drawOverlay() {
     spots.forEach(function (spot) {
       var side = spot.side, point = anchorPoint(node, side, spot.row);
       function same(a) { return a && a.id === node.id && a.side === side && (a.row == null ? null : a.row) === spot.row; }
-      var chosen = same(connectFrom) || (drag && drag.type === "connect" && same(drag.hot));
+      var chosen = same(connectFrom) || (drag && (drag.type === "connect" || drag.type === "reend") && same(drag.hot));
       var dot = makeEl("circle", {
         cx: point.x.toFixed(1), cy: point.y.toFixed(1), r: ((chosen ? 5.2 : spot.row != null ? 3.2 : 3.8) * k).toFixed(1),
         fill: chosen ? RED : "#FFFFFF", stroke: RED, "stroke-width": (1.4 * k).toFixed(2), class: "grab"
@@ -3066,6 +3117,16 @@ function drawOverlay() {
         if (h.axis) dot.dataset.handleAxis = h.axis;
         overlay.appendChild(dot);
       });
+      [["from", geo.start], ["to", geo.end]].forEach(function (end) {
+        var tip = makeEl("rect", {
+          x: (end[1].x - 4.5 * k).toFixed(1), y: (end[1].y - 4.5 * k).toFixed(1),
+          width: (9 * k).toFixed(1), height: (9 * k).toFixed(1), rx: (4.5 * k).toFixed(1),
+          fill: single.item[end[0]] ? RED : "#FFFFFF", stroke: RED, "stroke-width": (1.4 * k).toFixed(2), class: "grab"
+        });
+        tip.dataset.endEdge = single.item.id;
+        tip.dataset.endWhich = end[0];
+        overlay.appendChild(tip);
+      });
     }
   }
 }
@@ -3143,8 +3204,8 @@ function toneFor(index) { return PRESETS[index % PRESETS.length]; }
 
 function makeNode(type, style, at, tone) {
   var preset = tone || toneFor(toneIndex);
-  var wide = type === "diamond" ? 160 : type === "ellipse" ? 150 : type === "table" ? 270 : 170;
-  var tall = type === "diamond" ? 88 : type === "ellipse" ? 84 : type === "pill" ? 48 : type === "table" ? 96 : 54;
+  var wide = type === "diamond" ? 160 : type === "ellipse" ? 150 : type === "table" ? 270 : type === "database" ? 120 : 170;
+  var tall = type === "diamond" ? 88 : type === "ellipse" ? 84 : type === "pill" ? 48 : type === "table" ? 96 : type === "database" ? 92 : 54;
   var node = {
     id: uid("n"), type: type, style: style,
     x: snap(at.x - wide / 2), y: snap(at.y - tall / 2), w: wide, h: tall,
@@ -3306,6 +3367,37 @@ function addFreeText(at) {
   commit(); render(); selectOnly(item.id);
   openEditorSoon(item.id, "text");
   return item;
+}
+/* A new arrow (or line) between two ends, each { id, side, row } on a
+   shape or { pt } loose on the sheet. Lines have no head and run straight. */
+function newEdge(a, b, kind) {
+  var e = makeEdge(a.id || null, a.id ? a.side : "auto", b.id || null, b.id ? b.side : "auto", a.row, b.row);
+  if (!a.id) e.p1 = { x: a.pt.x, y: a.pt.y };
+  if (!b.id) e.p2 = { x: b.pt.x, y: b.pt.y };
+  if (kind === "line") { e.head = "none"; e.shape = "straight"; }
+  return e;
+}
+/* A copy of an arrow for duplicate and paste: tied ends follow the
+   copied shapes in `map`, loose ends shift along with them. An end tied
+   to a shape that is not being copied leaves the arrow out. */
+function copyEdge(e, map, shift) {
+  if ((e.from && !map[e.from]) || (e.to && !map[e.to])) return null;
+  var copy = deepCopy(e);
+  copy.id = uid("e");
+  if (e.from) copy.from = map[e.from]; else copy.p1 = { x: e.p1.x + shift, y: e.p1.y + shift };
+  if (e.to) copy.to = map[e.to]; else copy.p2 = { x: e.p2.x + shift, y: e.p2.y + shift };
+  return copy;
+}
+/* Where a loose end lands: on the grid when snapping is on, and with
+   Shift held, on the nearest 45° line from the other end. */
+function looseSpot(point, from, shiftKey) {
+  var p = { x: point.x, y: point.y };
+  if (shiftKey && from) {
+    var dx = p.x - from.x, dy = p.y - from.y, len = Math.hypot(dx, dy);
+    var ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+    return { x: Math.round(from.x + Math.cos(ang) * len), y: Math.round(from.y + Math.sin(ang) * len) };
+  }
+  return { x: snap(p.x), y: snap(p.y) };
 }
 function makeEdge(fromId, fromSide, toId, toSide, fromRow, toRow) {
   var e = {
@@ -3498,9 +3590,8 @@ function duplicateSelected() {
     texts().push(copy); fresh.push(copy.id);
   });
   found.filter(function (f) { return f.kind === "edge"; }).forEach(function (f) {
-    if (!map[f.item.from] || !map[f.item.to]) return;
-    var copy = deepCopy(f.item);
-    copy.id = uid("e"); copy.from = map[f.item.from]; copy.to = map[f.item.to];
+    var copy = copyEdge(f.item, map, 24);
+    if (!copy) return;
     edges().push(copy); fresh.push(copy.id);
   });
 
@@ -3534,8 +3625,8 @@ function pasteClipboard() {
     texts().push(copy); fresh.push(copy.id);
   });
   clipboard.edges.forEach(function (e) {
-    if (!map[e.from] || !map[e.to]) return;
-    var copy = deepCopy(e); copy.id = uid("e"); copy.from = map[e.from]; copy.to = map[e.to];
+    var copy = copyEdge(e, map, 26);
+    if (!copy) return;
     edges().push(copy); fresh.push(copy.id);
   });
   sel = new Set(fresh);
@@ -3700,19 +3791,23 @@ var TOOLS = [
   { id: "diamond", icon: "diamond", title: "Diamond",         key: "D" },
   { id: "sketch",  icon: "sketch",  title: "Inked box",       key: "S" },
   { id: "ellipse", icon: "ellipse", title: "Ellipse",         key: "E" },
+  { id: "database", icon: "database", title: "Database",      key: "Y" },
   { id: "table",   icon: "table",   title: "Table",           key: "G" },
   { id: "image",   icon: "image",   title: "Import an image", key: "I" },
   { sep: true },
   { id: "text",    icon: "text",    title: "Text",            key: "T" },
   { id: "pen",     icon: "pen",     title: "Draw",            key: "P" },
   { id: "code",    icon: "code",    title: "Code block",      key: "K" },
-  { id: "connect", icon: "connect", title: "Draw an arrow",   key: "C" }
+  { id: "connect", icon: "connect", title: "Draw an arrow",   key: "C" },
+  { id: "line",    icon: "line",    title: "Draw a line",     key: "L" }
 ];
-var SHORTCUT_TOOLS = { v: "select", h: "pan", b: "box", d: "diamond", s: "sketch", e: "ellipse", g: "table", t: "text", c: "connect", p: "pen", k: "code" };
+var SHORTCUT_TOOLS = { v: "select", h: "pan", b: "box", d: "diamond", s: "sketch", e: "ellipse", y: "database", g: "table", t: "text", c: "connect", l: "line", p: "pen", k: "code" };
+/* The arrow and line tools draw the same thing; a line has no head. */
+function isLineTool() { return tool === "connect" || tool === "line"; }
 
 function toolShape(id) {
   if (id === "sketch") return { type: "box", style: "sketch" };
-  if (id === "box" || id === "diamond" || id === "ellipse" || id === "pill" || id === "note" || id === "table" || id === "code") {
+  if (id === "box" || id === "diamond" || id === "ellipse" || id === "pill" || id === "note" || id === "database" || id === "table" || id === "code") {
     return { type: id, style: "wash" };
   }
   return null;
@@ -3724,7 +3819,7 @@ function setTool(next) {
     b.setAttribute("aria-pressed", String(b.dataset.tool === tool));
   });
   updateCursor();
-  if (tool === "connect") setHint("Click an edge dot to start an arrow, then click one on the shape it points to.");
+  if (isLineTool()) setHint("Drag anywhere to draw " + (tool === "line" ? "a line" : "an arrow") + ". Start or end on a shape to tie it there. Shift keeps it to 45°.");
   else if (tool === "text") setHint("Click the sheet to drop some text.");
   else if (tool === "pan") setHint("Drag to move the sheet around.");
   else if (tool === "pen") setHint("Draw on the canvas. Strokes made close together, one after another, stay one drawing. V or Esc to stop.");
@@ -3743,7 +3838,7 @@ var spaceDown = false;
 function updateCursor() {
   stage.classList.toggle("grabbing", !!(drag && drag.type === "pan" && (!drag.right || (rightPan && rightPan.moved))));
   stage.classList.toggle("grabby", !drag && (tool === "pan" || spaceDown));
-  stage.classList.toggle("crossy", tool === "connect" || tool === "pen" || !!toolShape(tool));
+  stage.classList.toggle("crossy", isLineTool() || tool === "pen" || !!toolShape(tool));
   stage.classList.toggle("texty", tool === "text");
   stage.classList.toggle("painty", tool === "paint");
 }
@@ -3785,6 +3880,12 @@ function nearestSide(node, point) {
   });
   return best;
 }
+/* Click-to-connect ending on empty sheet: the arrow ends loose there. */
+function finishConnectionAt(pt) {
+  edges().push(newEdge(connectFrom, { pt: pt }, tool === "line" ? "line" : "arrow"));
+  connectFrom = null;
+  commit(); render();
+}
 function startOrFinishConnection(id, side, row) {
   row = row == null || row === "" ? null : +row;
   if (!connectFrom) {
@@ -3794,7 +3895,7 @@ function startOrFinishConnection(id, side, row) {
     return;
   }
   if (connectFrom.id === id) { connectFrom = null; drawOverlay(); return; }
-  edges().push(makeEdge(connectFrom.id, connectFrom.side, id, side, connectFrom.row, row));
+  edges().push(newEdge(connectFrom, { id: id, side: side, row: row }, tool === "line" ? "line" : "arrow"));
   connectFrom = null;
   commit(); render();
   setHint("Arrow drawn. Double click it to add a label.");
@@ -3861,11 +3962,18 @@ stage.addEventListener("pointerdown", function (event) {
 
   if (editing && !(d.nodeId === editing.id || d.textId === editing.id || d.edgeId === editing.id)) closeEditor();
 
-  /* drag out of an edge dot, or click-to-connect with the arrow tool */
+  /* drag out of an edge dot; with the arrow or line tool a click on one
+     starts a click-to-connect instead */
   if (d.anchorSide) {
     var fromRow = d.anchorRow === undefined ? null : +d.anchorRow;
-    if (tool === "connect") { startOrFinishConnection(d.anchorNode, d.anchorSide, fromRow); return; }
-    drag = { type: "connect", fromId: d.anchorNode, fromSide: d.anchorSide, fromRow: fromRow, start: point, hot: null, preview: null };
+    drag = { type: "connect", fromId: d.anchorNode, fromSide: d.anchorSide, fromRow: fromRow, start: point, hot: null, preview: null,
+             byTool: isLineTool(), kind: tool === "line" ? "line" : "arrow" };
+    stage.setPointerCapture(event.pointerId);
+    return;
+  }
+  /* dragging either end of the picked arrow ties it to a shape or lets it loose */
+  if (d.endEdge) {
+    drag = { type: "reend", id: d.endEdge, which: d.endWhich, hot: null, moved: false };
     stage.setPointerCapture(event.pointerId);
     return;
   }
@@ -3904,7 +4012,19 @@ stage.addEventListener("pointerdown", function (event) {
 
   var hitId = d.nodeId || d.edgeId || d.textId || null;
 
-  if (tool === "connect" && d.nodeId) { var spot = attachAt(findNode(d.nodeId), point); startOrFinishConnection(d.nodeId, spot.side, spot.row); return; }
+  /* The arrow and line tools draw from wherever the press lands: tied to
+     the shape under it, or loose on the sheet. */
+  if (isLineTool()) {
+    var under = d.nodeId ? findNode(d.nodeId) : null, spot = under ? attachAt(under, point) : null;
+    drag = {
+      /* from inside a shape the arrow leaves by whichever side faces where it goes */
+      type: "connect", fromId: under ? under.id : null, fromSide: "auto", fromRow: spot ? spot.row : null,
+      start: point, from: under ? null : looseSpot(point), hot: null, preview: null,
+      byTool: true, kind: tool === "line" ? "line" : "arrow"
+    };
+    stage.setPointerCapture(event.pointerId);
+    return;
+  }
 
   /* A shape or text tool wins over whatever is already under the pointer,
      so you can drop something on top of an existing shape. */
@@ -3935,11 +4055,13 @@ stage.addEventListener("pointerdown", function (event) {
     else if (!sel.has(hitId)) selectOnly(hitId);
     else afterSelect();
 
-    if (d.edgeId && sel.size === 1) return;   /* edges move with their shapes */
+    /* tied arrows move with their shapes; loose ends move themselves */
+    if (d.edgeId && sel.size === 1 && !isLooseEdge(findEdge(d.edgeId))) return;
 
     var movers = [];
     selList().forEach(function (f) {
       if (f.kind === "node" || f.kind === "text") movers.push({ id: f.item.id, x: f.item.x, y: f.item.y });
+      else if (f.kind === "edge" && isLooseEdge(f.item)) movers.push({ id: f.item.id, edge: true, p1: f.item.p1 && deepCopy(f.item.p1), p2: f.item.p2 && deepCopy(f.item.p2) });
     });
     if (!movers.length) return;
     var box = selectionBox();
@@ -3992,6 +4114,11 @@ window.addEventListener("pointermove", function (event) {
     drag.movers.forEach(function (m) {
       var f = findAny(m.id);
       if (!f) return;
+      if (m.edge) {
+        if (m.p1 && !f.item.from) f.item.p1 = { x: Math.round(m.p1.x + dx), y: Math.round(m.p1.y + dy) };
+        if (m.p2 && !f.item.to) f.item.p2 = { x: Math.round(m.p2.x + dx), y: Math.round(m.p2.y + dy) };
+        return;
+      }
       f.item.x = Math.round(m.x + dx);
       f.item.y = Math.round(m.y + dy);
     });
@@ -4108,21 +4235,39 @@ window.addEventListener("pointermove", function (event) {
     if (over && over.id === drag.fromId) over = null;
     var spot = over ? attachAt(over, point) : null;
     drag.hot = over ? { id: over.id, side: spot.side, row: spot.row } : null;
-
-    var from = findNode(drag.fromId);
-    var startPt = anchorPoint(from, drag.fromSide, drag.fromRow);
-    var dir = outward(drag.fromSide);
-    var endPt = drag.hot ? anchorPoint(over, drag.hot.side, drag.hot.row) : point;
-    var span = Math.hypot(endPt.x - startPt.x, endPt.y - startPt.y);
-    var pull = Math.max(30, span * 0.4);
-    var endDir = drag.hot ? outward(drag.hot.side) : { x: 0, y: 0 };
-    drag.preview = pathFrom([
-      startPt.x, startPt.y,
-      startPt.x + dir.x * pull, startPt.y + dir.y * pull,
-      endPt.x + endDir.x * pull, endPt.y + endDir.y * pull,
-      endPt.x, endPt.y
-    ]);
+    var startPt = drag.fromId ? anchorPoint(findNode(drag.fromId), drag.fromSide, edgeRow(findNode(drag.fromId), drag.fromRow)) : drag.from;
+    drag.to = drag.hot ? null : looseSpot(point, startPt, event.shiftKey);
+    /* the preview is the arrow it will make, drawn the same way */
+    var trial = newEdge(drag.fromId ? { id: drag.fromId, side: drag.fromSide, row: drag.fromRow } : { pt: drag.from },
+                        drag.hot || { pt: drag.to }, drag.kind);
+    var trialGeo = edgeGeometry(trial);
+    drag.preview = trialGeo ? trialGeo.d : null;
     drawOverlay();
+    return;
+  }
+  /* an end of the picked arrow follows the pointer, tying on to any shape
+     it is over except the one the other end is on */
+  if (drag.type === "reend") {
+    var re = findEdge(drag.id);
+    if (!re) return;
+    var keys = drag.which === "from" ? ["from", "fromSide", "fromRow", "p1"] : ["to", "toSide", "toRow", "p2"];
+    var otherId = drag.which === "from" ? re.to : re.from;
+    var onto = nodeAt(point);
+    if (onto && onto.id === otherId) onto = null;
+    if (onto) {
+      var at2 = attachAt(onto, point);
+      re[keys[0]] = onto.id; re[keys[1]] = at2.side;
+      if (at2.row != null) re[keys[2]] = at2.row; else delete re[keys[2]];
+      delete re[keys[3]];
+      drag.hot = { id: onto.id, side: at2.side, row: at2.row };
+    } else {
+      var geoOther = edgeGeometry(re), fixed = geoOther ? (drag.which === "from" ? geoOther.end : geoOther.start) : null;
+      re[keys[0]] = null; re[keys[1]] = "auto"; delete re[keys[2]];
+      re[keys[3]] = looseSpot(point, fixed, event.shiftKey);
+      drag.hot = null;
+    }
+    drag.moved = true;
+    renderCanvas();
     return;
   }
 
@@ -4146,8 +4291,11 @@ window.addEventListener("pointermove", function (event) {
     }
     nodes().forEach(function (n) { if (overlaps({ x: n.x, y: n.y, w: n.w, h: n.h })) hits.push(n.id); });
     texts().forEach(function (t) { if (overlaps(boxOf({ kind: "text", item: t }))) hits.push(t.id); });
+    function endIn(id, pt) {
+      return id ? hits.indexOf(id) >= 0 : !!pt && overlaps({ x: pt.x, y: pt.y, w: 0.01, h: 0.01 });
+    }
     edges().forEach(function (e) {
-      if (hits.indexOf(e.from) >= 0 && hits.indexOf(e.to) >= 0) hits.push(e.id);
+      if (endIn(e.from, e.p1) && endIn(e.to, e.p2)) hits.push(e.id);
     });
     sel = drag.add ? new Set(Array.from(drag.base).concat(hits)) : new Set(hits);
     drawOverlay(); renderBubble();
@@ -4199,19 +4347,23 @@ function endDrag(event) {
   ghost = null;
 
   if (d.type === "connect") {
-    if (d.hot) {
-      edges().push(makeEdge(d.fromId, d.fromSide, d.hot.id, d.hot.side, d.fromRow, d.hot.row));
-      commit(); render();
-      setHint("Arrow drawn. Double click it to add a label.");
-    } else if (point && Math.hypot(point.x - d.start.x, point.y - d.start.y) * viewScale() < 4) {
-      /* a click on an edge dot that goes nowhere picks the shape instead */
-      selectOnly(d.fromId);
+    var stayed = !point || Math.hypot(point.x - d.start.x, point.y - d.start.y) * viewScale() < 4;
+    if (stayed) {
+      if (d.byTool && d.fromId) startOrFinishConnection(d.fromId, d.fromSide, d.fromRow);
+      else if (d.byTool && connectFrom) finishConnectionAt(d.from);
+      else if (d.fromId) selectOnly(d.fromId);   /* a click on an edge dot that goes nowhere picks the shape instead */
       render();
-    } else {
-      render();
+      return;
     }
+    var made = newEdge(d.fromId ? { id: d.fromId, side: d.fromSide, row: d.fromRow } : { pt: d.from },
+                       d.hot || { pt: d.to || looseSpot(point) }, d.kind);
+    edges().push(made);
+    commit(); render();
+    if (d.byTool) selectOnly(made.id);
+    setHint((d.kind === "line" ? "Line" : "Arrow") + " drawn. Drag its ends to move them, or double click it to add a label.");
     return;
   }
+  if (d.type === "reend") { if (d.moved) commit(); render(); return; }
 
   if (d.type === "marquee") { render(); return; }
   if (d.type === "move" && !d.moved) { render(); return; }
@@ -4994,7 +5146,7 @@ function buildShapeLook(shapes) {
 }
 function shapeTypeControl(shapes) {
   bubble.appendChild(selectControl([
-    ["box", "Box"], ["diamond", "Diamond"], ["ellipse", "Ellipse"], ["pill", "Pill"], ["note", "Note"]
+    ["box", "Box"], ["diamond", "Diamond"], ["ellipse", "Ellipse"], ["pill", "Pill"], ["note", "Note"], ["database", "Database"]
   ], shapes[0].type, "Shape", function (v) {
     patchSelected(onlyShapes({ type: function (it) { return it.type === "table" ? undefined : v; } }));
   }));
@@ -5317,10 +5469,15 @@ function buildEdgeBubble(edge) {
   }
   bubble.appendChild(divider());
 
-  bubble.appendChild(selectControl(SIDES.concat(["auto"]).map(function (s) { return [s, s]; }),
-    edge.fromSide || "auto", "Leaves from", function (v) { patchSelected({ fromSide: v }); }));
-  bubble.appendChild(selectControl(SIDES.concat(["auto"]).map(function (s) { return [s, s]; }),
-    edge.toSide || "auto", "Arrives at", function (v) { patchSelected({ toSide: v }); }));
+  /* a loose end has no side to choose */
+  if (edge.from) {
+    bubble.appendChild(selectControl(SIDES.concat(["auto"]).map(function (s) { return [s, s]; }),
+      edge.fromSide || "auto", "Leaves from", function (v) { patchSelected({ fromSide: v }); }));
+  }
+  if (edge.to) {
+    bubble.appendChild(selectControl(SIDES.concat(["auto"]).map(function (s) { return [s, s]; }),
+      edge.toSide || "auto", "Arrives at", function (v) { patchSelected({ toSide: v }); }));
+  }
   /* an end on a table can be tied to one of its rows */
   [["from", "fromRow", "fromSide", "From row"], ["to", "toRow", "toSide", "To row"]].forEach(function (end) {
     var table = findNode(edge[end[0]]);
@@ -5345,9 +5502,10 @@ function buildEdgeBubble(edge) {
     onClick: function () {
       selList().filter(function (f) { return f.kind === "edge"; }).forEach(function (f) {
         var e = f.item;
-        var a = e.from, as = e.fromSide;
-        e.from = e.to; e.fromSide = e.toSide;
-        e.to = a; e.toSide = as;
+        var a = e.from, as = e.fromSide, ar = e.fromRow, ap = e.p1;
+        e.from = e.to; e.fromSide = e.toSide; e.fromRow = e.toRow; e.p1 = e.p2;
+        e.to = a; e.toSide = as; e.toRow = ar; e.p2 = ap;
+        ["fromRow", "toRow", "p1", "p2"].forEach(function (key) { if (e[key] == null) delete e[key]; });
         delete e.o1; delete e.o2;
       });
       commit(); render();
@@ -5599,6 +5757,11 @@ function stencilPreview(kind) {
     svg.appendChild(makeEl("path", {
       d: wobblyPath(corners, 1.5, random), fill: "currentColor", "fill-opacity": 0.12,
       stroke: "currentColor", "stroke-width": 1.4, "stroke-linecap": "round"
+    }));
+  }
+  if (kind.type === "database") {
+    svg.appendChild(makeEl("path", {
+      d: smoothPath(dbLidPoints(fake)), fill: "none", stroke: "currentColor", "stroke-width": 1.2, "stroke-linecap": "round"
     }));
   }
   if (kind.type === "code") {
@@ -6096,8 +6259,9 @@ function itemName(id) {
   if (f.kind === "text") return { label: plainText(it.text).split("\n")[0] || "Empty text", icon: "text", dim: !it.text };
   if (f.kind === "edge") {
     if (it.label) return { label: plainText(it.label), icon: "connect" };
-    var a = findNode(it.from), b = findNode(it.to);
-    return { label: "Arrow: " + shortName(a) + " → " + shortName(b), icon: "connect", dim: true };
+    var a = findNode(it.from), b = findNode(it.to), what = it.head === "none" && it.tail !== "arrow" ? "Line" : "Arrow";
+    if (!a && !b) return { label: what, icon: what === "Line" ? "line" : "connect", dim: true };
+    return { label: what + ": " + (a ? shortName(a) : "·") + " → " + (b ? shortName(b) : "·"), icon: "connect", dim: true };
   }
   if (it.type === "image") return { label: "Image", icon: "image", dim: true };
   if (it.type === "ink") return { label: "Drawing", icon: "pen", dim: true };
@@ -7210,7 +7374,7 @@ function showShortcuts() {
     m.appendChild(htmlEl("p", "sub", "These all work while the sheet has focus."));
     var keys = htmlEl("div", "keys");
     [["V  H", "Select, pan"], ["B  D  S  E", "Box, diamond, inked, ellipse"], ["G", "Table"],
-     ["T", "Text"], ["C", "Draw an arrow"], ["P", "Pen: draw freehand"], ["K", "Code block"], ["I", "Import an image"], ["O", "Show or hide the reveal order"],
+     ["Y", "Database"], ["T", "Text"], ["C  L", "Draw an arrow, draw a line"], ["P", "Pen: draw freehand"], ["K", "Code block"], ["I", "Import an image"], ["O", "Show or hide the reveal order"],
      [MOD + " + V", "Paste shapes, or a picture you copied"],
      ["Double click", "Type on a shape, arrow or label"], ["Enter", "Edit whatever is selected"],
      ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
@@ -7353,7 +7517,14 @@ document.addEventListener("keydown", function (event) {
     var step = event.shiftKey ? 10 : 1;
     var moved = false;
     selList().forEach(function (found) {
-      if (found.kind === "edge") return;
+      if (found.kind === "edge") {
+        ["p1", "p2"].forEach(function (k, i) {
+          if ((i ? found.item.to : found.item.from) || !found.item[k]) return;
+          found.item[k] = { x: found.item[k].x + nudges[event.key][0] * step, y: found.item[k].y + nudges[event.key][1] * step };
+          moved = true;
+        });
+        return;
+      }
       found.item.x += nudges[event.key][0] * step;
       found.item.y += nudges[event.key][1] * step;
       moved = true;
