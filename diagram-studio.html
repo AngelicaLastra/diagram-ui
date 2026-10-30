@@ -321,6 +321,7 @@ input[type="color"] {
   box-shadow: 0 0 0 3px var(--red-soft); z-index: 7; line-height: 1.3;
 }
 .inline-edit:focus { outline: none; }
+.inline-edit::placeholder { color: var(--ink-soft); opacity: 0.7; }
 .inline-edit[hidden] { display: none; }
 
 /* dropdown / context menu */
@@ -2576,10 +2577,19 @@ function drawFreeText(item) {
     wrapWidth: item.w > 0 ? item.w : null
   });
   labelGroup.appendChild(node);
-
-  var box = node.getBBox();
+  measureText(item);
+}
+/* A text's box, for its hit target, its selection outline and the typing
+   box. Only text already on the page can be measured, so a new one is
+   measured again once it is placed. Empty text gets a box one line tall
+   where its first line would be. */
+function measureText(item) {
+  var g = keyCache.labels.get(item.id);
+  if (!g || !g.isConnected) return;
+  var b = g.getBBox();
+  var box = b.width || b.height ? { x: b.x, y: b.y, width: b.width, height: b.height }
+    : { x: item.anchor === "middle" ? item.x - 20 : item.anchor === "end" ? item.x - 40 : item.x, y: item.y - item.size * 0.95, width: 40, height: item.size * 1.25 };
   textBounds[item.id] = box;
-
   var hit = keyedHit(item.id, "rect", "textId");
   setAttrs(hit, {
     x: box.x - 4, y: box.y - 4,
@@ -2725,6 +2735,7 @@ function renderCanvas() {
   texts().forEach(function (t) { top.push(keyCache.labels.get(t.id)); });
   syncChildren(shapesLayer, bottom);
   syncChildren(labelsLayer, top);
+  texts().forEach(measureText);
   pruneCache(keyCache.shapes, order);
   pruneCache(keyCache.labels, order);
   syncLayer(hitsGroup, keyCache.hits, order);
@@ -3357,15 +3368,21 @@ function addNode(type, style, at, tone) {
   openEditorSoon(node.id, defaultField(node.id));
   return node;
 }
-function addFreeText(at) {
+/* New text starts empty and reads from where it was put: the first line
+   sits on `at` (its middle on a click, its top when a box was dragged
+   out), and a `width` makes it wrap within that column. It is not kept
+   until something is typed, so a stray click leaves nothing behind. */
+function addFreeText(at, width, fromTop) {
+  var before = stateJSON(), size = 15;
   var item = {
-    id: uid("t"), x: snap(at.x), y: snap(at.y), text: "Note",
-    size: 15, weight: 500, color: INK, anchor: "middle",
+    id: uid("t"), x: snap(at.x), y: Math.round(at.y + (fromTop ? size * 0.95 : size * 0.35)), text: "",
+    size: size, weight: 500, color: INK, anchor: "start",
     bold: false, italic: false, strike: false, underline: false
   };
+  if (width) item.w = Math.round(width);
   texts().push(item);
-  commit(); render(); selectOnly(item.id);
-  openEditorSoon(item.id, "text");
+  render(); selectOnly(item.id);
+  openEditorSoon(item.id, "text", before);
   return item;
 }
 /* A new arrow (or line) between two ends, each { id, side, row } on a
@@ -4035,7 +4052,12 @@ stage.addEventListener("pointerdown", function (event) {
     stage.setPointerCapture(event.pointerId);
     return;
   }
-  if (tool === "text") { addFreeText(point); setTool("select"); return; }
+  if (tool === "text") {
+    drag = { type: "textbox", start: point, moved: false };
+    ghost = { x: point.x, y: point.y, w: 0, h: 0 };
+    stage.setPointerCapture(event.pointerId);
+    return;
+  }
 
   if (hitId) {
     var hitNode = d.nodeId ? findNode(d.nodeId) : null;
@@ -4271,7 +4293,7 @@ window.addEventListener("pointermove", function (event) {
     return;
   }
 
-  if (drag.type === "place") {
+  if (drag.type === "place" || drag.type === "textbox") {
     var w = point.x - drag.start.x, h = point.y - drag.start.y;
     if (Math.abs(w) > 5 || Math.abs(h) > 5) drag.moved = true;
     ghost = { x: Math.min(drag.start.x, point.x), y: Math.min(drag.start.y, point.y), w: Math.abs(w), h: Math.abs(h) };
@@ -4342,6 +4364,14 @@ function endDrag(event) {
     commit(); render(); selectOnly(node.id);
     if (!(event && event.altKey)) setTool("select");
     openEditorSoon(node.id, defaultField(node.id));
+    return;
+  }
+  if (d.type === "textbox") {
+    var area = d.moved && ghost && ghost.w > 30 ? ghost : null;
+    ghost = null;
+    setTool("select");
+    if (area) addFreeText({ x: area.x, y: area.y }, area.w, true);
+    else addFreeText(point || d.start);
     return;
   }
   ghost = null;
@@ -4471,6 +4501,11 @@ function defaultField(id, point) {
 }
 stage.addEventListener("dblclick", function (event) {
   var id = idFromTarget(event.target);
+  if (!id && tool === "select" && blankTarget(event.target) && !editing) {
+    event.preventDefault();
+    addFreeText(toStage(event));
+    return;
+  }
   if (!id || tool === "pen" || tool === "paint") return;
   event.preventDefault();
   openEditor(id, defaultField(id, toStage(event)));
@@ -4494,9 +4529,9 @@ stage.addEventListener("pointerdown", function (event) {
   }
 }, true);
 
-function openEditorSoon(id, field) { window.setTimeout(function () { openEditor(id, field); }, 0); }
+function openEditorSoon(id, field, before) { window.setTimeout(function () { openEditor(id, field, before); }, 0); }
 
-function openEditor(id, field) {
+function openEditor(id, field, before) {
   var found = findAny(id);
   if (!found) return;
   if (!field) return;
@@ -4508,7 +4543,7 @@ function openEditor(id, field) {
   tapOpening = false;
   var opening = parseCell(field);
   if (opening) pickCell(id, opening.r, opening.c);
-  editing = { id: id, kind: found.kind, field: field, before: stateJSON() };
+  editing = { id: id, kind: found.kind, field: field, before: before || stateJSON() };
 
   var cell = parseCell(field);
   var value = cell ? (found.item.cells[cell.r][cell.c] || "")
@@ -4518,6 +4553,7 @@ function openEditor(id, field) {
             : (found.item.label || "");
 
   inlineInput.value = value;
+  inlineInput.placeholder = found.kind === "text" ? "Type here" : "";
   inlineInput.hidden = false;
   layoutEditor();
   drawOverlay(); renderBubble();
@@ -4530,6 +4566,7 @@ function openEditor(id, field) {
   if (field === "code") { setHint("Typing code. Tab indents, Enter starts a new line, Esc or " + MOD + "+Enter finishes."); return; }
   setHint((cell ? "Typing in a cell. Tab moves to the next one, Esc finishes."
     : found.kind === "node" ? "Typing. Tab swaps between the title and the caption, Esc finishes."
+    : found.kind === "text" ? "Typing. Enter starts a new line; Esc or a click outside finishes."
     : "Typing. Esc finishes.") + " Select words and press " + MOD + "+B, I, U or E (code) to format just them.");
 }
 
@@ -4572,12 +4609,15 @@ function layoutEditor() {
       spot = {
         x: colm.x + colm.w / 2, y: box ? box.y + box.height / 2 : t.y, width: colm.w + 10, size: t.size,
         textAlign: t.anchor === "start" ? "left" : t.anchor === "end" ? "right" : "center",
-        lines: richLines(inlineInput.value, { size: t.size, bold: t.bold, wrapWidth: t.w }).length
+        lines: richLines(inlineInput.value, { size: t.size, bold: t.bold, italic: t.italic, weight: t.weight || 400, wrapWidth: t.w }).length
       };
     } else {
-      spot = box
-        ? { x: box.x + box.width / 2, y: box.y + box.height / 2, width: Math.max(box.width, 90), size: t.size }
-        : { x: t.x, y: t.y, width: 120, size: t.size };
+      var room = Math.max((box ? box.width : 0) + t.size * 2, 160), pad = 9 / k;
+      spot = {
+        x: t.anchor === "start" ? t.x - pad + room / 2 : t.anchor === "end" ? t.x + pad - room / 2 : t.x,
+        y: box ? box.y + box.height / 2 : t.y - t.size * 0.35, width: room, size: t.size,
+        textAlign: t.anchor === "start" ? "left" : t.anchor === "end" ? "right" : "center"
+      };
     }
   } else {
     var geo = edgeGeometry(found.item);
@@ -4598,6 +4638,7 @@ function layoutEditor() {
   inlineInput.style.fontStyle = !spot.mono && found.item.italic ? "italic" : "normal";
   inlineInput.style.textAlign = spot.textAlign || "";
   inlineInput.style.fontFamily = spot.mono ? MONO : "";
+  inlineInput.style.color = found.kind === "text" ? (found.item.color || "") : "";
   inlineInput.style.lineHeight = spot.mono ? String(lineGap) : "";
   if (spot.mono) inlineInput.setAttribute("wrap", "off"); else inlineInput.removeAttribute("wrap");
 
@@ -4638,6 +4679,12 @@ function closeEditor(silent) {
   var was = editing;
   editing = null;
   inlineInput.hidden = true;
+  /* text left empty goes, so it never lingers as an invisible item */
+  var left = findAny(was.id);
+  if (left && left.kind === "text" && !String(left.item.text || "").trim()) {
+    page().texts = texts().filter(function (t) { return t.id !== was.id; });
+    sel.delete(was.id);
+  }
   fmtStrip.hidden = true;
   inkRow.hidden = true; inkToggle.setAttribute("aria-pressed", "false"); inkSpan = null;
   if (!silent) {
@@ -4714,7 +4761,7 @@ inlineInput.addEventListener("keydown", function (event) {
   }
   if (event.key === "Escape") { event.preventDefault(); closeEditor(); return; }
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); closeEditor(); return; }
-  if (event.key === "Enter" && !event.shiftKey && editing && (editing.kind !== "node" || parseCell(editing.field))) {
+  if (event.key === "Enter" && !event.shiftKey && editing && ((editing.kind !== "node" && editing.kind !== "text") || parseCell(editing.field))) {
     event.preventDefault(); closeEditor(); return;
   }
   if (event.key === "Tab" && editing && parseCell(editing.field)) {
@@ -7374,7 +7421,7 @@ function showShortcuts() {
     m.appendChild(htmlEl("p", "sub", "These all work while the sheet has focus."));
     var keys = htmlEl("div", "keys");
     [["V  H", "Select, pan"], ["B  D  S  E", "Box, diamond, inked, ellipse"], ["G", "Table"],
-     ["Y", "Database"], ["T", "Text"], ["C  L", "Draw an arrow, draw a line"], ["P", "Pen: draw freehand"], ["K", "Code block"], ["I", "Import an image"], ["O", "Show or hide the reveal order"],
+     ["Y", "Database"], ["T", "Text, or double click the sheet (drag to set its width)"], ["C  L", "Draw an arrow, draw a line"], ["P", "Pen: draw freehand"], ["K", "Code block"], ["I", "Import an image"], ["O", "Show or hide the reveal order"],
      [MOD + " + V", "Paste shapes, or a picture you copied"],
      ["Double click", "Type on a shape, arrow or label"], ["Enter", "Edit whatever is selected"],
      ["Tab", "Swap title and caption, or move to the next cell"], ["Esc", "Finish typing, or clear the selection"],
