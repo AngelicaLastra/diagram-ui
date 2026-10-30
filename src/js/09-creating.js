@@ -16,7 +16,7 @@ function makeNode(type, style, at, tone) {
   };
   if (type === "table") { node.cells = blankCells(3, 3); node.header = true; syncFills(node); }
   if (type === "code") {
-    node.lang = "sql"; node.code = "select *\nfrom students\nwhere active"; node.lineNumbers = true;
+    node.lang = "sql"; node.code = "select *\nfrom orders\nwhere paid"; node.lineNumbers = true;
     node.fill = CODE_PAPER.fill; node.accent = CODE_PAPER.accent; node.titleSize = 11;
     fitCode(node);
     node.x = snap(at.x - node.w / 2); node.y = snap(at.y - node.h / 2);

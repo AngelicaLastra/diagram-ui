@@ -977,7 +977,7 @@ function snap(value) {
    marker only counts when it hugs a word (no space just inside it) and
    has a partner later on the line, so "2 * 3" and "C++" stay as typed;
    a backslash keeps a marker literal. Underscores are left alone, since
-   names like school_id are common. Colour wraps words as
+   names like order_id are common. Colour wraps words as
    {#D9480F}these words{/} and can hold the other formats inside. */
 var RICH_MARKS = [["**", "b"], ["++", "u"], ["~~", "s"], ["*", "i"]];
 var MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
@@ -2249,7 +2249,7 @@ function showCodeColours(id) {
       var row = htmlEl("div", "gif-row");
       row.appendChild(htmlEl("span", "gif-label", k[1]));
       row.appendChild(colorControl(own || codeDefault(group), k[1] + " colour", function (hex) { setCodeInk(id, group, hex); showCodeColours(id); }));
-      var sample = htmlEl("code", "code-sample", { plain: "students", kw: "select", fn: "count()", str: "'2024-25'", num: "42", com: "-- note", punct: "( , )", jinja: "{{ ref() }}", key: "name:", line: "1 2 3" }[group]);
+      var sample = htmlEl("code", "code-sample", { plain: "orders", kw: "select", fn: "count()", str: "'paid'", num: "42", com: "-- note", punct: "( , )", jinja: "{{ ref() }}", key: "name:", line: "1 2 3" }[group]);
       sample.style.color = own || codeDefault(group);
       row.appendChild(sample);
       if (own) row.appendChild(toolButton({ label: "Reset", title: "Back to the usual colour", onClick: function () { setCodeInk(id, group, null); showCodeColours(id); } }));
@@ -3305,7 +3305,7 @@ function makeNode(type, style, at, tone) {
   };
   if (type === "table") { node.cells = blankCells(3, 3); node.header = true; syncFills(node); }
   if (type === "code") {
-    node.lang = "sql"; node.code = "select *\nfrom students\nwhere active"; node.lineNumbers = true;
+    node.lang = "sql"; node.code = "select *\nfrom orders\nwhere paid"; node.lineNumbers = true;
     node.fill = CODE_PAPER.fill; node.accent = CODE_PAPER.accent; node.titleSize = 11;
     fitCode(node);
     node.x = snap(at.x - node.w / 2); node.y = snap(at.y - node.h / 2);
@@ -7727,7 +7727,7 @@ function loadSample() {
   P.nodes = [
     { id: "a", type: "box", style: "wash", x: 60, y: 90, w: 170, h: 54,
       fill: "#C3DDF4", accent: "#6FA9DB", filled: true,
-      title: "Source systems", sub: "SIS, assessment, LMS", titleSize: 11.5, titleColor: INK },
+      title: "Source systems", sub: "web, mobile, billing", titleSize: 11.5, titleColor: INK },
     { id: "b", type: "box", style: "wash", x: 60, y: 210, w: 170, h: 54,
       fill: "#C3DDF4", accent: "#6FA9DB", filled: true,
       title: "Airflow ingest", sub: "one task per source", titleSize: 11.5, titleColor: INK },
@@ -7742,7 +7742,7 @@ function loadSample() {
       title: "Tests pass?", sub: "", titleSize: 11.5, titleColor: INK },
     { id: "f", type: "box", style: "wash", x: 580, y: 450, w: 170, h: 54,
       fill: "#F8DFA3", accent: "#EFB13A", filled: true,
-      title: "Dashboards", sub: "published to districts", titleSize: 11.5, titleColor: INK },
+      title: "Dashboards", sub: "shared with every team", titleSize: 11.5, titleColor: INK },
     { id: "g", type: "box", style: "wash", x: 570, y: 290, w: 170, h: 54,
       fill: "#FFFFFF", accent: "#DD4B44", filled: false,
       title: "Alert on-call", sub: "halt the DAG", titleSize: 11.5, titleColor: RED }

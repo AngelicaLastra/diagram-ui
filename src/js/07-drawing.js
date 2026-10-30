@@ -530,7 +530,7 @@ function showCodeColours(id) {
       var row = htmlEl("div", "gif-row");
       row.appendChild(htmlEl("span", "gif-label", k[1]));
       row.appendChild(colorControl(own || codeDefault(group), k[1] + " colour", function (hex) { setCodeInk(id, group, hex); showCodeColours(id); }));
-      var sample = htmlEl("code", "code-sample", { plain: "students", kw: "select", fn: "count()", str: "'2024-25'", num: "42", com: "-- note", punct: "( , )", jinja: "{{ ref() }}", key: "name:", line: "1 2 3" }[group]);
+      var sample = htmlEl("code", "code-sample", { plain: "orders", kw: "select", fn: "count()", str: "'paid'", num: "42", com: "-- note", punct: "( , )", jinja: "{{ ref() }}", key: "name:", line: "1 2 3" }[group]);
       sample.style.color = own || codeDefault(group);
       row.appendChild(sample);
       if (own) row.appendChild(toolButton({ label: "Reset", title: "Back to the usual colour", onClick: function () { setCodeInk(id, group, null); showCodeColours(id); } }));

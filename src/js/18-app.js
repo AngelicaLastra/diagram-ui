@@ -194,7 +194,7 @@ function loadSample() {
   P.nodes = [
     { id: "a", type: "box", style: "wash", x: 60, y: 90, w: 170, h: 54,
       fill: "#C3DDF4", accent: "#6FA9DB", filled: true,
-      title: "Source systems", sub: "SIS, assessment, LMS", titleSize: 11.5, titleColor: INK },
+      title: "Source systems", sub: "web, mobile, billing", titleSize: 11.5, titleColor: INK },
     { id: "b", type: "box", style: "wash", x: 60, y: 210, w: 170, h: 54,
       fill: "#C3DDF4", accent: "#6FA9DB", filled: true,
       title: "Airflow ingest", sub: "one task per source", titleSize: 11.5, titleColor: INK },
@@ -209,7 +209,7 @@ function loadSample() {
       title: "Tests pass?", sub: "", titleSize: 11.5, titleColor: INK },
     { id: "f", type: "box", style: "wash", x: 580, y: 450, w: 170, h: 54,
       fill: "#F8DFA3", accent: "#EFB13A", filled: true,
-      title: "Dashboards", sub: "published to districts", titleSize: 11.5, titleColor: INK },
+      title: "Dashboards", sub: "shared with every team", titleSize: 11.5, titleColor: INK },
     { id: "g", type: "box", style: "wash", x: 570, y: 290, w: 170, h: 54,
       fill: "#FFFFFF", accent: "#DD4B44", filled: false,
       title: "Alert on-call", sub: "halt the DAG", titleSize: 11.5, titleColor: RED }

@@ -6,7 +6,7 @@
    marker only counts when it hugs a word (no space just inside it) and
    has a partner later on the line, so "2 * 3" and "C++" stay as typed;
    a backslash keeps a marker literal. Underscores are left alone, since
-   names like school_id are common. Colour wraps words as
+   names like order_id are common. Colour wraps words as
    {#D9480F}these words{/} and can hold the other formats inside. */
 var RICH_MARKS = [["**", "b"], ["++", "u"], ["~~", "s"], ["*", "i"]];
 var MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
