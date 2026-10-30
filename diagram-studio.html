@@ -1054,8 +1054,16 @@ function richLines(content, format) {
   var out = [];
   String(content == null ? "" : content).split("\n").forEach(function (para) {
     var runs = parseRich(para);
-    if (!format.wrapWidth) { out.push(runs); return; }
-    var max = format.wrapWidth, line = [], used = 0;
+    if (!format.wrapWidth) {
+      /* spaces at the end of a line would only nudge it off centre */
+      var tail = runs[runs.length - 1];
+      if (tail && tail.text) tail.text = tail.text.replace(/\s+$/, "");
+      out.push(runs);
+      return;
+    }
+    /* spaces at the start of a typed line are an indent and stay; a line
+       started by wrapping drops them */
+    var max = format.wrapWidth, line = [], used = 0, typedStart = true;
     function put(text, run) {
       var last = line[line.length - 1];
       if (last && sameStyle(last, run)) last.text += text;
@@ -1064,13 +1072,13 @@ function richLines(content, format) {
     function breakLine() {
       while (line.length && !line[line.length - 1].text.trim()) line.pop();
       if (line.length) line[line.length - 1].text = line[line.length - 1].text.replace(/\s+$/, "");
-      out.push(line); line = []; used = 0;
+      out.push(line); line = []; used = 0; typedStart = false;
     }
     runs.forEach(function (run) {
       run.text.split(/(\s+)/).forEach(function (tok) {
         if (!tok) return;
         var w = runWidth(Object.assign({}, run, { text: tok }), format);
-        if (!tok.trim()) { if (line.length) { put(tok, run); used += w; } return; }
+        if (!tok.trim()) { if (line.length || typedStart) { put(tok, run); used += w; } return; }
         if (used + w > max && line.length) breakLine();
         while (w > max && tok.length > 1) {
           var cut = tok.length - 1;
@@ -1121,6 +1129,10 @@ function styledText(x, y, content, format) {
     "text-anchor": format.anchor || "start"
   });
   if (decorations.length) node.setAttribute("text-decoration", decorations.join(" "));
+  /* keep every space as typed: SVG would otherwise fold runs of them
+     into one, and indents (like a folder tree) would lose their shape */
+  node.setAttributeNS("http://www.w3.org/XML/1998/namespace", "xml:space", "preserve");
+  node.style.whiteSpace = "pre";
 
   var lines = richLines(content, format);
   var plain = lines.every(function (l) { return l.every(function (r) { return !r.b && !r.i && !r.u && !r.s && !r.code && !r.c; }); });
