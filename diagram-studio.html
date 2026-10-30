@@ -1234,12 +1234,24 @@ function buildFilters() {
    8. Hand drawn outlines
    ================================================================ */
 function jitterPoints(points, jitter, random) {
-  return points.map(function (p) {
-    return { x: p.x + (random() * 2 - 1) * jitter, y: p.y + (random() * 2 - 1) * jitter };
+  var offsets = points.map(function () {
+    return { x: (random() * 2 - 1) * jitter, y: (random() * 2 - 1) * jitter };
   });
+  /* Densely spaced points (the curvy shapes) share their nudges with
+     their neighbours, so the line drifts like a hand rather than
+     zigzagging from one point to the next. */
+  if (points.length > 6) {
+    var n = points.length;
+    offsets = offsets.map(function (o, i) {
+      var a = offsets[(i - 1 + n) % n], b = offsets[(i + 1) % n];
+      return { x: (a.x + o.x * 2 + b.x) / 4 * 1.2, y: (a.y + o.y * 2 + b.y) / 4 * 1.2 };
+    });
+  }
+  return points.map(function (p, i) { return { x: p.x + offsets[i].x, y: p.y + offsets[i].y }; });
 }
 function closedPath(moved, jitter, random) {
   function off() { return (random() * 2 - 1) * jitter * 1.3; }
+  if (moved.length > 6) return smoothLoop(moved, off);
   var d = "M" + moved[0].x.toFixed(1) + "," + moved[0].y.toFixed(1);
   for (var i = 0; i < moved.length; i++) {
     var from = moved[i];
@@ -1247,6 +1259,23 @@ function closedPath(moved, jitter, random) {
     d += " Q" + ((from.x + to.x) / 2 + off()).toFixed(1) + "," +
          ((from.y + to.y) / 2 + off()).toFixed(1) + " " +
          to.x.toFixed(1) + "," + to.y.toFixed(1);
+  }
+  return d + " Z";
+}
+/* Curvy outlines (ellipse, pill, database) are a ring of many points.
+   Bending each segment its own way leaves a kink at every point, which
+   reads as spikes, so these run one smooth curve through the nudged
+   points instead: still lumpy, never pointed. The bends are still drawn
+   from the random stream so the rest of the shape comes out the same. */
+function smoothLoop(moved, off) {
+  var n = moved.length, f = function (v) { return v.toFixed(1); };
+  var d = "M" + f(moved[0].x) + "," + f(moved[0].y);
+  for (var i = 0; i < n; i++) {
+    off(); off();
+    var p0 = moved[(i - 1 + n) % n], p1 = moved[i], p2 = moved[(i + 1) % n], p3 = moved[(i + 2) % n];
+    d += " C" + f(p1.x + (p2.x - p0.x) / 6) + "," + f(p1.y + (p2.y - p0.y) / 6) + " " +
+         f(p2.x - (p3.x - p1.x) / 6) + "," + f(p2.y - (p3.y - p1.y) / 6) + " " +
+         f(p2.x) + "," + f(p2.y);
   }
   return d + " Z";
 }
